@@ -215,9 +215,23 @@ class FlatSlider(tk.Canvas):
         self._act = active or COLORS["ACCENT"]
         self._font = font
         self._h = height
-        self._x0, self._y = 6, height // 2          # 轨道范围与中心线
+        self._x0, self._y = 8, height // 2          # 轨道范围与中心线
         self._moved = False
-        super().__init__(master, width=self._len + 56, height=height,
+        # 按数值文本在该字体下的实际宽度预留右侧数值区，避免不同字体/DPI 下数字被截断
+        try:
+            _fnt = tkfont.Font(font=font)
+        except Exception:
+            _fnt = None
+
+        def _m(t):
+            return _fnt.measure(t) if _fnt is not None else len(t) * 8
+
+        if self._res >= 1:
+            sample = max(str(int(round(self._to))), str(int(round(self._frm))), key=len)
+        else:
+            sample = "%.2f" % max(abs(self._frm), abs(self._to))
+        self._val_w = _m(sample) + 12
+        super().__init__(master, width=self._len + 20 + self._val_w, height=height,
                          highlightthickness=0, bd=0, bg=master["bg"],
                          cursor="hand2")
         if self._var is not None:
@@ -277,12 +291,12 @@ class FlatSlider(tk.Canvas):
         tx = self._x0 + frac * self._len
         self.create_oval(tx - 8, cy - 8, tx + 8, cy + 8,
                          fill="#FFFFFF", outline="#D0D0D7", width=1)
-        # 右侧数值（分辨率 >=1 显示整数，否则两位小数）
+        # 右侧数值（分辨率 >=1 显示整数，否则两位小数；左对齐防止右侧被截断）
         if self._res >= 1:
             txt = "%d" % int(round(self.get()))
         else:
             txt = "%.2f" % self.get()
-        self.create_text(x1 + 26, cy, text=txt, anchor="center",
+        self.create_text(x1 + 10, cy, text=txt, anchor="w",
                          fill=COLORS["SUB"], font=self._font)
 
 import numpy as np
