@@ -21,6 +21,7 @@
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 import numpy as np
 from scipy.io import wavfile
@@ -32,10 +33,18 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib import rcParams
 
-# 中文字体兼容设置（Windows 下 SimHei，Linux 下常见中文字体）
-rcParams["font.sans-serif"] = ["SimHei", "Microsoft YaHei", "Noto Sans CJK SC",
-                               "WenQuanYi Micro Hei", "Arial Unicode MS", "DejaVu Sans"]
+# macOS 风格绘图字体：中文优先苹方中等、英文优先 Inter-Medium，逐级回退保证跨平台
+rcParams["font.sans-serif"] = ["PingFang SC Medium", "PingFang SC", "Inter Medium",
+                               "Inter", "Microsoft YaHei", "Noto Sans CJK SC",
+                               "WenQuanYi Micro Hei", "DejaVu Sans"]
 rcParams["axes.unicode_minus"] = False
+rcParams["axes.facecolor"] = "#FFFFFF"
+rcParams["figure.facecolor"] = "#FFFFFF"
+rcParams["axes.edgecolor"] = "#E3E3E8"
+rcParams["axes.labelcolor"] = "#1D1D1F"
+rcParams["text.color"] = "#1D1D1F"
+rcParams["xtick.color"] = "#8E8E93"
+rcParams["ytick.color"] = "#8E8E93"
 
 try:
     import sounddevice as sd
@@ -143,13 +152,28 @@ def mse(clean, est):
 # ===================== GUI 主界面 =====================
 
 class SpeechGUI(tk.Tk):
-    """语音采集及降噪系统主界面"""
+    """语音采集及降噪系统主界面（macOS 风格：浅灰底 + 白色卡片 + 扁平按钮 + 系统蓝强调色）"""
+
+    # -------- macOS 设计规范：颜色 --------
+    C_BG     = "#F2F2F7"
+    C_CARD   = "#FFFFFF"
+    C_TEXT   = "#1D1D1F"
+    C_SUB    = "#8E8E93"
+    C_ACCENT = "#0A84FF"
+    C_ACC_D  = "#0068DA"
+    C_BTN    = "#E8E8ED"
+    C_BTN_D  = "#D9D9E0"
+    C_LINE   = "#E3E3E8"
+    C_OK     = "#2FBF5F"
+    GLASS    = "#FAFAFC"
 
     def __init__(self):
         super().__init__()
         self.title("语音采集及降噪系统")
         self.geometry("1460x860")
         self.minsize(1200, 700)
+        self.configure(bg=self.C_BG)
+        self._setup_fonts()
 
         self.fs = 16000            # 当前采样率
         self.original = None       # 原始语音 float64 数组
@@ -161,128 +185,192 @@ class SpeechGUI(tk.Tk):
 
         self._build_ui()
 
+    # ------------------------- 主题（字体 / 控件工厂） -------------------------
+
+    def _setup_fonts(self):
+        """英文优先 Inter-Medium，中文优先苹方中等（PingFang SC Medium），未安装时逐级回退"""
+        avail = set(tkfont.families(self))
+
+        def pick(candidates, fallback):
+            for c in candidates:
+                if c in avail:
+                    return c
+            return fallback
+
+        self.f_en = pick(["Inter-Medium", "Inter Medium", "Inter",
+                          "SF Pro Text", "Helvetica Neue", "Segoe UI"], "Arial")
+        self.f_cn = pick(["PingFang SC Medium", "PingFangSC-Medium", "PingFang SC",
+                          "Microsoft YaHei UI", "Microsoft YaHei",
+                          "Noto Sans CJK SC", "WenQuanYi Micro Hei"], "SimHei")
+
+    def F(self, size, bold=False, eng=False):
+        """界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
+        return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
+
+    def _btn(self, parent, text, command, primary=False, width=None, size=10, bold=False):
+        """macOS 风格扁平按钮：primary=True 蓝底白字，否则浅灰底深字"""
+        bg = self.C_ACCENT if primary else self.C_BTN
+        ab = self.C_ACC_D if primary else self.C_BTN_D
+        fg = "#FFFFFF" if primary else self.C_TEXT
+        return tk.Button(parent, text=text, command=command, width=width,
+                         relief=tk.FLAT, bd=0, highlightthickness=0,
+                         bg=bg, fg=fg, activebackground=ab, activeforeground=fg,
+                         font=self.F(size, bold), padx=10, pady=3, cursor="hand2")
+
+    def _lab(self, parent, text, size=10, fg=None, bold=False):
+        """文字标签：自动继承父面板底色"""
+        return tk.Label(parent, text=text, bg=parent["bg"], fg=fg or self.C_TEXT,
+                        font=self.F(size, bold))
+
+    def _slider(self, parent, var, frm, to, res=1.0, length=170, command=None, size=9):
+        """macOS 风格滑块：细滑杆、蓝色激活态、无边框"""
+        return tk.Scale(parent, from_=frm, to=to, resolution=res, orient=tk.HORIZONTAL,
+                        variable=var, length=length, command=command,
+                        bg=self.C_CARD, fg=self.C_TEXT, troughcolor=self.C_LINE,
+                        activebackground=self.C_ACCENT, highlightthickness=0, bd=0,
+                        font=self.F(size), sliderlength=14, highlightbackground=self.C_CARD)
+
+    def _radio(self, parent, text, var, value, size=10):
+        """白底单选按钮（卡片内使用）"""
+        return tk.Radiobutton(parent, text=text, variable=var, value=value,
+                              bg=self.C_CARD, fg=self.C_TEXT, activebackground=self.C_CARD,
+                              activeforeground=self.C_ACCENT, selectcolor=self.C_CARD,
+                              highlightthickness=0, bd=0, font=self.F(size))
+
+    def _card(self, parent, title=None):
+        """白色卡片面板（细描边、粗体标题）"""
+        card = tk.Frame(parent, bg=self.C_CARD, bd=0,
+                        highlightthickness=1, highlightbackground=self.C_LINE)
+        if title:
+            tk.Label(card, text=title, bg=self.C_CARD, fg=self.C_TEXT,
+                     font=self.F(11, True, eng=True)).pack(anchor="w", padx=12, pady=(8, 2))
+        return card
+
     # ------------------------- 界面搭建 -------------------------
 
     def _build_ui(self):
-        body = tk.Frame(self)
+        body = tk.Frame(self, bg=self.C_BG)
         body.pack(fill=tk.BOTH, expand=True)
 
         # ---------------- 左侧控制面板 ----------------
-        ctrl = tk.Frame(body, width=430)
-        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
+        ctrl = tk.Frame(body, width=452, bg=self.C_BG)
+        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 6), pady=10)
         ctrl.pack_propagate(False)
 
         # ① 语音采集 / 文件读写
-        f1 = tk.LabelFrame(ctrl, text="① 语音采集 / 读写")
-        f1.pack(fill=tk.X, pady=3)
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=6, pady=2)
-        tk.Label(row, text="采样率:").pack(side=tk.LEFT)
+        f1 = self._card(ctrl, "①　语音采集 / 读写")
+        f1.pack(fill=tk.X, pady=(0, 10))
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 2))
+        self._lab(row, "采样率", size=9).pack(side=tk.LEFT)
         self.fs_combo = ttk.Combobox(row, values=["8000", "16000", "44100"],
-                                     width=8, state="readonly")
+                                     width=8, state="readonly",
+                                     font=self.F(10, eng=True))
         self.fs_combo.current(1)
-        self.fs_combo.pack(side=tk.LEFT, padx=4)
-        tk.Label(row, text="时长(s):").pack(side=tk.LEFT)
+        self.fs_combo.pack(side=tk.LEFT, padx=8)
+        self._lab(row, "时长(s)", size=9).pack(side=tk.LEFT)
         self.dur_var = tk.StringVar(value="3")
-        tk.Entry(row, textvariable=self.dur_var, width=6).pack(side=tk.LEFT, padx=4)
+        tk.Entry(row, textvariable=self.dur_var, width=6, relief=tk.FLAT, bd=0,
+                 highlightthickness=1, highlightbackground=self.C_LINE,
+                 highlightcolor=self.C_ACCENT, bg=self.C_CARD, fg=self.C_TEXT,
+                 font=self.F(10, eng=True), insertbackground=self.C_TEXT
+                 ).pack(side=tk.LEFT, padx=8, ipady=2)
 
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=6)
-        tk.Button(row, text="开始采集", width=10, command=self.start_record).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="停止采集", width=10, command=self.stop_record).pack(side=tk.LEFT, padx=3)
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=6)
-        tk.Button(row, text="打开音频文件", width=10, command=self.open_audio).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="保存当前信号WAV", width=14, command=self.save_signal).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="生成测试音频", width=10, command=self.gen_test).pack(side=tk.LEFT, padx=3)
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=2)
+        self._btn(row, "开始采集", self.start_record, primary=True, width=10).pack(side=tk.LEFT, padx=(0, 6))
+        self._btn(row, "停止采集", self.stop_record, width=10).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(2, 8))
+        self._btn(row, "打开音频文件", self.open_audio, width=10).pack(side=tk.LEFT, padx=(0, 6))
+        self._btn(row, "保存当前信号WAV", self.save_signal, width=14).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "生成测试音频", self.gen_test, width=10).pack(side=tk.LEFT, padx=6)
 
         # ② 语音播放
-        f2 = tk.LabelFrame(ctrl, text="② 语音播放")
-        f2.pack(fill=tk.X, pady=3)
-        row = tk.Frame(f2); row.pack(fill=tk.X, padx=6)
-        tk.Label(row, text="播放源:").pack(side=tk.LEFT)
+        f2 = self._card(ctrl, "②　语音播放")
+        f2.pack(fill=tk.X, pady=(0, 10))
+        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        self._lab(row, "播放源", size=9).pack(side=tk.LEFT)
         self.play_src = tk.IntVar(value=0)
-        tk.Radiobutton(row, text="原始", variable=self.play_src, value=0).pack(side=tk.LEFT)
-        tk.Radiobutton(row, text="加噪", variable=self.play_src, value=1).pack(side=tk.LEFT)
-        tk.Radiobutton(row, text="去噪", variable=self.play_src, value=2).pack(side=tk.LEFT)
+        self._radio(row, "原始", self.play_src, 0).pack(side=tk.LEFT, padx=6)
+        self._radio(row, "加噪", self.play_src, 1).pack(side=tk.LEFT, padx=6)
+        self._radio(row, "去噪", self.play_src, 2).pack(side=tk.LEFT, padx=6)
 
-        row = tk.Frame(f2); row.pack(fill=tk.X, padx=6)
-        tk.Label(row, text="速度:").pack(side=tk.LEFT)
+        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "速度", size=9).pack(side=tk.LEFT)
         self.speed_var = tk.DoubleVar(value=1.0)
-        tk.Scale(row, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
-                 variable=self.speed_var, length=200).pack(side=tk.LEFT)
+        self._slider(row, self.speed_var, 0.25, 2.0, 0.05, 190).pack(side=tk.LEFT, padx=8)
 
-        row = tk.Frame(f2); row.pack(fill=tk.X, padx=6)
-        tk.Button(row, text="播放", width=8, command=lambda: self._play(self.speed_var.get())).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="停止", width=8, command=self.stop_play).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="快进×2", width=8, command=self.play_fast).pack(side=tk.LEFT, padx=3)
-        tk.Button(row, text="慢放×0.5", width=9, command=self.play_slow).pack(side=tk.LEFT, padx=3)
+        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(0, 8))
+        self._btn(row, "播放", lambda: self._play(self.speed_var.get()), primary=True, width=8
+                  ).pack(side=tk.LEFT, padx=(0, 6))
+        self._btn(row, "停止", self.stop_play, width=8).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "快进×2", self.play_fast, width=8).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "慢放×0.5", self.play_slow, width=9).pack(side=tk.LEFT, padx=6)
 
         # ③ 加噪
-        f3 = tk.LabelFrame(ctrl, text="③ 加噪（2 种噪声）")
-        f3.pack(fill=tk.X, pady=3)
+        f3 = self._card(ctrl, "③　加噪（2 种噪声）")
+        f3.pack(fill=tk.X, pady=(0, 10))
         self.noise_type = tk.IntVar(value=0)
-        row = tk.Frame(f3); row.pack(fill=tk.X, padx=6)
-        tk.Radiobutton(row, text="高斯白噪声", variable=self.noise_type, value=0).pack(side=tk.LEFT)
-        tk.Label(row, text="SNR(dB):").pack(side=tk.LEFT)
+        row = tk.Frame(f3, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        self._radio(row, "高斯白噪声", self.noise_type, 0).pack(side=tk.LEFT)
+        self._lab(row, "SNR(dB)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.snr_var = tk.DoubleVar(value=10.0)
-        tk.Scale(row, from_=-10, to=60, resolution=1, orient=tk.HORIZONTAL,
-                 variable=self.snr_var, length=140).pack(side=tk.LEFT)
-        row = tk.Frame(f3); row.pack(fill=tk.X, padx=6)
-        tk.Radiobutton(row, text="脉冲噪声", variable=self.noise_type, value=1).pack(side=tk.LEFT)
-        tk.Label(row, text="密度(%):").pack(side=tk.LEFT)
+        self._slider(row, self.snr_var, -10, 60, 1, 150).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f3, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._radio(row, "脉冲噪声", self.noise_type, 1).pack(side=tk.LEFT)
+        self._lab(row, "密度(%)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.dens_var = tk.DoubleVar(value=5.0)
-        tk.Scale(row, from_=0, to=50, resolution=0.5, orient=tk.HORIZONTAL,
-                 variable=self.dens_var, length=140).pack(side=tk.LEFT)
-        tk.Button(f3, text="执行加噪", width=14, command=self.do_add_noise).pack(pady=3)
+        self._slider(row, self.dens_var, 0, 50, 0.5, 150).pack(side=tk.LEFT, padx=6)
+        self._btn(f3, "执行加噪", self.do_add_noise).pack(fill=tk.X, padx=11, pady=(2, 8))
 
         # ④ 去噪
-        f4 = tk.LabelFrame(ctrl, text="④ 去噪（3 种算法）")
-        f4.pack(fill=tk.X, pady=3)
+        f4 = self._card(ctrl, "④　去噪（3 种算法）")
+        f4.pack(fill=tk.X, pady=(0, 10))
         self.denoise_type = tk.IntVar(value=0)
-        row = tk.Frame(f4); row.pack(fill=tk.X, padx=6)
-        tk.Radiobutton(row, text="维纳", variable=self.denoise_type, value=0).pack(side=tk.LEFT)
-        tk.Label(row, text="窗长:").pack(side=tk.LEFT)
+        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        self._radio(row, "维纳", self.denoise_type, 0).pack(side=tk.LEFT)
+        self._lab(row, "窗长", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.win_var = tk.IntVar(value=9)
-        tk.Scale(row, from_=3, to=101, resolution=2, orient=tk.HORIZONTAL,
-                 variable=self.win_var, length=110).pack(side=tk.LEFT)
-        row = tk.Frame(f4); row.pack(fill=tk.X, padx=6)
-        tk.Radiobutton(row, text="卡尔曼", variable=self.denoise_type, value=1).pack(side=tk.LEFT)
-        tk.Label(row, text="lgQ:").pack(side=tk.LEFT)
+        self._slider(row, self.win_var, 3, 101, 2, 130).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._radio(row, "卡尔曼", self.denoise_type, 1).pack(side=tk.LEFT)
+        self._lab(row, "lgQ", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.kfq_var = tk.DoubleVar(value=-2.0)
-        tk.Scale(row, from_=-6.0, to=-2.0, resolution=0.1, orient=tk.HORIZONTAL,
-                 variable=self.kfq_var, length=80).pack(side=tk.LEFT)
-        tk.Label(row, text="lgR:").pack(side=tk.LEFT)
+        self._slider(row, self.kfq_var, -6.0, -2.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
+        self._lab(row, "lgR", size=9).pack(side=tk.LEFT, padx=(8, 0))
         self.kfr_var = tk.DoubleVar(value=-2.0)
-        tk.Scale(row, from_=-3.0, to=0.0, resolution=0.1, orient=tk.HORIZONTAL,
-                 variable=self.kfr_var, length=80).pack(side=tk.LEFT)
-        row = tk.Frame(f4); row.pack(fill=tk.X, padx=6)
-        tk.Radiobutton(row, text="小波", variable=self.denoise_type, value=2).pack(side=tk.LEFT)
-        tk.Label(row, text="层数:").pack(side=tk.LEFT)
+        self._slider(row, self.kfr_var, -3.0, 0.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
+        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._radio(row, "小波", self.denoise_type, 2).pack(side=tk.LEFT)
+        self._lab(row, "层数", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.wl_lvl_var = tk.IntVar(value=3)
-        tk.Scale(row, from_=1, to=6, resolution=1, orient=tk.HORIZONTAL,
-                 variable=self.wl_lvl_var, length=80).pack(side=tk.LEFT)
-        tk.Label(row, text="阈值系数:").pack(side=tk.LEFT)
+        self._slider(row, self.wl_lvl_var, 1, 6, 1, 70).pack(side=tk.LEFT, padx=4)
+        self._lab(row, "阈值系数", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.wl_thr_var = tk.DoubleVar(value=0.5)
-        tk.Scale(row, from_=0.1, to=2.0, resolution=0.1, orient=tk.HORIZONTAL,
-                 variable=self.wl_thr_var, length=80).pack(side=tk.LEFT)
-        tk.Button(f4, text="执行去噪", width=14, command=self.do_denoise).pack(pady=3)
+        self._slider(row, self.wl_thr_var, 0.1, 2.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
+        self._btn(f4, "执行去噪", self.do_denoise).pack(fill=tk.X, padx=11, pady=(4, 8))
 
         # ⑤ 效果分析
-        f5 = tk.LabelFrame(ctrl, text="⑤ 去噪效果分析（SNR / MSE）")
-        f5.pack(fill=tk.X, pady=3)
-        tk.Label(f5, textvariable=self.metric_var, justify=tk.LEFT,
-                 anchor="w", font=("", 10)).pack(fill=tk.X, padx=6, pady=4)
-        tk.Button(f5, text="更新频谱对比图", width=18, command=self.update_plots).pack(pady=3)
+        f5 = self._card(ctrl, "⑤　去噪效果分析（SNR / MSE）")
+        f5.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(f5, textvariable=self.metric_var, justify=tk.LEFT, anchor="w",
+                 bg=self.C_CARD, fg=self.C_TEXT, font=self.F(10, eng=True)
+                 ).pack(fill=tk.X, padx=12, pady=6)
+        self._btn(f5, "更新频谱对比图", self.update_plots, primary=True).pack(fill=tk.X, padx=11, pady=(0, 8))
 
         # ---------------- 右侧绘图区 ----------------
-        right = tk.Frame(body)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        right = self._card(body, "时域波形与 FFT 频谱分析")
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12), pady=10)
         self.fig = Figure(figsize=(9.0, 7.6), dpi=100)
         self.axes = self.fig.subplots(2, 2)
+        self.fig.subplots_adjust(left=0.07, right=0.97, top=0.93, bottom=0.07,
+                                 wspace=0.22, hspace=0.38)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # 状态栏
-        tk.Label(self, textvariable=self.status_var, anchor="w", bd=1,
-                 relief=tk.SUNKEN, fg="#05a").pack(side=tk.BOTTOM, fill=tk.X)
+        # 状态栏（macOS 风格细线分隔）
+        tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(self, textvariable=self.status_var, anchor="w", bg=self.GLASS,
+                 fg=self.C_OK, font=self.F(10), padx=12, pady=5).pack(side=tk.BOTTOM, fill=tk.X)
 
         self.update_plots()
 
@@ -478,6 +566,11 @@ class SpeechGUI(tk.Tk):
     def update_plots(self):
         for ax in self.axes.ravel():
             ax.clear()
+            # macOS 风格：白底、浅灰细网格、去掉上/右边框线
+            ax.set_facecolor("#FFFFFF")
+            ax.grid(True, color="#E3E3E8", linewidth=0.6, alpha=0.7)
+            for s in ("top", "right"):
+                ax.spines[s].set_visible(False)
         if self.original is None:
             self.canvas.draw_idle()
             return

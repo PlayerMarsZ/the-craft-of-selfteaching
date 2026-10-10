@@ -19,6 +19,7 @@
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 import numpy as np
 from PIL import Image, ImageTk
 from scipy import ndimage
@@ -291,13 +292,29 @@ def combined_segment(img, smax=7, fg_coef=0.35):
 # ===================== GUI 主界面 =====================
 
 class CellSegGUI(tk.Tk):
-    """病理细胞图像分割系统主界面"""
+    """病理细胞图像分割系统主界面（macOS 风格：浅灰底 + 白色卡片 + 扁平按钮 + 系统蓝强调色）"""
+
+    # -------- macOS 设计规范：颜色 --------
+    C_BG     = "#F2F2F7"   # 窗口底色（浅灰）
+    C_CARD   = "#FFFFFF"   # 卡片 / 面板底色
+    C_TEXT   = "#1D1D1F"   # 主文字
+    C_SUB    = "#8E8E93"   # 次要文字 / 提示
+    C_ACCENT = "#0A84FF"   # 强调色（macOS 系统蓝）
+    C_ACC_D  = "#0068DA"   # 强调色按下
+    C_BTN    = "#E8E8ED"   # 次级按钮底色
+    C_BTN_D  = "#D9D9E0"   # 次级按钮按下
+    C_LINE   = "#E3E3E8"   # 分隔线 / 描边
+    C_OK     = "#2FBF5F"   # 成功状态文字（macOS 绿）
+    C_CANVAS = "#202024"   # 图像画布底色（深灰，衬托病理图）
+    GLASS    = "#FAFAFC"   # 工具栏底色
 
     def __init__(self):
         super().__init__()
         self.title("病理细胞图像分割系统")
         self.geometry("1320x900")
         self.minsize(1100, 700)
+        self.configure(bg=self.C_BG)
+        self._setup_fonts()     # 必须在创建任何带文字的控件前设置字体
 
         self.original = None        # 原始图像数组
         self.current = None         # 当前处理结果数组
@@ -319,152 +336,209 @@ class CellSegGUI(tk.Tk):
         self._bind_crop()
         self._bind_res_view()
 
+    # ------------------------- 主题（字体 / 控件工厂） -------------------------
+
+    def _setup_fonts(self):
+        """选择界面字体：英文优先 Inter-Medium，中文优先苹方中等（PingFang SC Medium）；
+        字体未安装时按候选列表自动回退，保证跨平台显示正常"""
+        avail = set(tkfont.families(self))
+
+        def pick(candidates, fallback):
+            for c in candidates:
+                if c in avail:
+                    return c
+            return fallback
+
+        self.f_en = pick(["Inter-Medium", "Inter Medium", "Inter",
+                          "SF Pro Text", "Helvetica Neue", "Segoe UI"], "Arial")
+        self.f_cn = pick(["PingFang SC Medium", "PingFangSC-Medium", "PingFang SC",
+                          "Microsoft YaHei UI", "Microsoft YaHei",
+                          "Noto Sans CJK SC", "WenQuanYi Micro Hei"], "SimHei")
+
+    def F(self, size, bold=False, eng=False):
+        """生成界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
+        return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
+
+    def _btn(self, parent, text, command, primary=False, width=None, size=10, bold=False):
+        """macOS 风格扁平按钮：primary=True 为蓝底白字主按钮，否则浅灰底深字次级按钮"""
+        bg = self.C_ACCENT if primary else self.C_BTN
+        ab = self.C_ACC_D if primary else self.C_BTN_D
+        fg = "#FFFFFF" if primary else self.C_TEXT
+        return tk.Button(parent, text=text, command=command, width=width,
+                         relief=tk.FLAT, bd=0, highlightthickness=0,
+                         bg=bg, fg=fg, activebackground=ab, activeforeground=fg,
+                         font=self.F(size, bold), padx=10, pady=3, cursor="hand2")
+
+    def _lab(self, parent, text, size=10, fg=None, bold=False):
+        """文字标签：自动继承父面板底色，保持卡片内部一致"""
+        return tk.Label(parent, text=text, bg=parent["bg"], fg=fg or self.C_TEXT,
+                        font=self.F(size, bold))
+
+    def _slider(self, parent, var, frm, to, res=1.0, length=170, command=None, size=9):
+        """macOS 风格滑块：细滑杆、蓝色激活态、无边框"""
+        return tk.Scale(parent, from_=frm, to=to, resolution=res, orient=tk.HORIZONTAL,
+                        variable=var, length=length, command=command,
+                        bg=self.C_CARD, fg=self.C_TEXT, troughcolor=self.C_LINE,
+                        activebackground=self.C_ACCENT, highlightthickness=0, bd=0,
+                        font=self.F(size), sliderlength=14, highlightbackground=self.C_CARD)
+
+    def _card(self, parent, title=None):
+        """白色卡片面板（卡片式设计，带细描边与可选粗体标题）"""
+        card = tk.Frame(parent, bg=self.C_CARD, bd=0,
+                        highlightthickness=1, highlightbackground=self.C_LINE)
+        if title:
+            tk.Label(card, text=title, bg=self.C_CARD, fg=self.C_TEXT,
+                     font=self.F(11, True, eng=True)).pack(anchor="w", padx=12, pady=(8, 2))
+        return card
+
     # ------------------------- 界面搭建 -------------------------
 
     def _build_toolbar(self):
-        bar = tk.Frame(self, bd=2, relief=tk.RAISED)
+        bar = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
         bar.pack(side=tk.TOP, fill=tk.X)
-        tk.Button(bar, text="打开图像", width=12, command=self.open_image).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Button(bar, text="生成示例细胞图", width=14, command=self.load_sample).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Button(bar, text="保存当前结果", width=12, command=self.save_current).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Button(bar, text="保存前后对比图", width=14, command=self.save_compare).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Button(bar, text="重置", width=8, command=self.reset).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Label(bar, textvariable=self.result_text, fg="#0a5", anchor="w").pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=12)
+        tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.TOP, fill=tk.X)   # 工具栏下细分隔线
+        self._btn(bar, "打开图像", self.open_image, primary=True, width=11).pack(
+            side=tk.LEFT, padx=(14, 6), pady=8)
+        self._btn(bar, "生成示例细胞图", self.load_sample, width=13).pack(side=tk.LEFT, padx=6, pady=8)
+        self._btn(bar, "保存当前结果", self.save_current, width=11).pack(side=tk.LEFT, padx=6, pady=8)
+        self._btn(bar, "保存前后对比图", self.save_compare, width=12).pack(side=tk.LEFT, padx=6, pady=8)
+        self._btn(bar, "重置", self.reset, width=7).pack(side=tk.LEFT, padx=6, pady=8)
+        tk.Label(bar, textvariable=self.result_text, fg=self.C_OK, bg=self.GLASS,
+                 font=self.F(10), anchor="w").pack(side=tk.LEFT, fill=tk.X, expand=True, padx=14)
 
     def _build_body(self):
-        body = tk.Frame(self)
+        body = tk.Frame(self, bg=self.C_BG)
         body.pack(fill=tk.BOTH, expand=True)
 
         # ---------------- 左侧控制面板 ----------------
-        ctrl = tk.Frame(body, width=340)
-        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=6)
+        ctrl = tk.Frame(body, width=354, bg=self.C_BG)
+        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 6), pady=10)
         ctrl.pack_propagate(False)
 
         # ① 基础操作
-        f1 = tk.LabelFrame(ctrl, text="① 基础操作")
-        f1.pack(fill=tk.X, pady=3)
-        tk.Button(f1, text="灰度化", width=18, command=lambda: self.apply_op(to_gray, "灰度化")).pack(pady=2)
+        f1 = self._card(ctrl, "①　基础操作")
+        f1.pack(fill=tk.X, pady=(0, 10))
+        self._btn(f1, "灰度化", lambda: self.apply_op(to_gray, "灰度化")).pack(fill=tk.X, padx=11, pady=(4, 3))
 
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="缩放:").pack(side=tk.LEFT)
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "缩放", size=9).pack(side=tk.LEFT)
         self.scale_var = tk.DoubleVar(value=1.0)
-        self.scale_slider = tk.Scale(row, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
-                                     variable=self.scale_var, length=170, command=self._on_scale)
-        self.scale_slider.pack(side=tk.LEFT)
+        self.scale_slider = self._slider(row, self.scale_var, 0.25, 2.0, 0.05, 150, self._on_scale)
+        self.scale_slider.pack(side=tk.LEFT, padx=6)
         # 按下时锁定基准（此时值尚未被拖动改变）；拖动仅做预览，点【应用缩放】后才正式生效
         self.scale_slider.bind("<ButtonPress-1>", self._scale_begin)
-        tk.Button(f1, text="应用缩放", width=18, command=self.do_scale).pack(pady=2)
+        self._btn(f1, "应用缩放", self.do_scale).pack(fill=tk.X, padx=11, pady=3)
 
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="旋转:").pack(side=tk.LEFT)
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "旋转", size=9).pack(side=tk.LEFT)
         self.rot_var = tk.DoubleVar(value=0.0)
-        self.rot_slider = tk.Scale(row, from_=-180, to=180, resolution=1, orient=tk.HORIZONTAL,
-                                   variable=self.rot_var, length=170, command=self._on_rotate)
-        self.rot_slider.pack(side=tk.LEFT)
+        self.rot_slider = self._slider(row, self.rot_var, -180, 180, 1, 150, self._on_rotate)
+        self.rot_slider.pack(side=tk.LEFT, padx=6)
         # 与缩放相同的交互：按下锁定基准，拖动仅预览，点【应用旋转】后才正式生效
         self.rot_slider.bind("<ButtonPress-1>", self._rot_begin)
-        tk.Button(f1, text="应用旋转", width=18, command=self.do_rotate).pack(pady=2)
+        self._btn(f1, "应用旋转", self.do_rotate).pack(fill=tk.X, padx=11, pady=3)
 
-        self.crop_btn = tk.Button(f1, text="裁剪（在原图上拖拽框选区域）", width=30, command=self.toggle_crop)
-        self.crop_btn.pack(pady=2)
+        self.crop_btn = self._btn(f1, "裁剪（在原图上拖拽框选区域）", self.toggle_crop)
+        self.crop_btn.pack(fill=tk.X, padx=11, pady=3)
 
-        tk.Label(f1, text="窗宽窗位调节（滑块实时预览）", fg="#36a").pack()
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="窗位C:").pack(side=tk.LEFT)
+        self._lab(f1, "窗宽窗位调节（滑块实时预览）", size=9, fg=self.C_ACCENT).pack(anchor="w", padx=11, pady=(4, 1))
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "窗位C", size=9).pack(side=tk.LEFT)
         self.wc_var = tk.DoubleVar(value=128)
-        tk.Scale(row, from_=0, to=255, resolution=1, orient=tk.HORIZONTAL,
-                 variable=self.wc_var, length=170, command=self._on_wl).pack(side=tk.LEFT)
-        row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="窗宽W:").pack(side=tk.LEFT)
+        self._slider(row, self.wc_var, 0, 255, 1, 150, self._on_wl).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "窗宽W", size=9).pack(side=tk.LEFT)
         self.ww_var = tk.DoubleVar(value=256)
-        tk.Scale(row, from_=1, to=512, resolution=1, orient=tk.HORIZONTAL,
-                 variable=self.ww_var, length=170, command=self._on_wl).pack(side=tk.LEFT)
+        self._slider(row, self.ww_var, 1, 512, 1, 150, self._on_wl).pack(side=tk.LEFT, padx=6, pady=(0, 8))
 
         # ② 图像增强（去噪）
-        f2 = tk.LabelFrame(ctrl, text="② 图像增强 / 去噪（3 种方法）")
-        f2.pack(fill=tk.X, pady=3)
-        tk.Button(f2, text="标准中值滤波", width=18,
-                  command=lambda: self.apply_op(lambda im: median_denoise(im, self.smax_var.get() or 3),
-                                                "标准中值滤波")).pack(pady=2)
-        row = tk.Frame(f2); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="中值最大窗口:").pack(side=tk.LEFT)
+        f2 = self._card(ctrl, "②　图像增强 / 去噪")
+        f2.pack(fill=tk.X, pady=(0, 10))
+        self._btn(f2, "标准中值滤波",
+                  lambda: self.apply_op(lambda im: median_denoise(im, self.smax_var.get() or 3),
+                                        "标准中值滤波")).pack(fill=tk.X, padx=11, pady=(4, 3))
+        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "中值最大窗口", size=9).pack(side=tk.LEFT)
         self.smax_var = tk.IntVar(value=7)
-        tk.Scale(row, from_=3, to=11, resolution=2, orient=tk.HORIZONTAL,
-                 variable=self.smax_var, length=150).pack(side=tk.LEFT)
-        tk.Button(f2, text="自适应中值滤波", width=18,
-                  command=lambda: self.apply_op(lambda im: adaptive_median_filter(im, self.smax_var.get()),
-                                                "自适应中值滤波")).pack(pady=2)
-        row = tk.Frame(f2); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="高斯σ:").pack(side=tk.LEFT)
+        self._slider(row, self.smax_var, 3, 11, 2, 135).pack(side=tk.LEFT, padx=6)
+        self._btn(f2, "自适应中值滤波",
+                  lambda: self.apply_op(lambda im: adaptive_median_filter(im, self.smax_var.get()),
+                                        "自适应中值滤波")).pack(fill=tk.X, padx=11, pady=3)
+        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "高斯σ", size=9).pack(side=tk.LEFT)
         self.sigma_var = tk.DoubleVar(value=1.5)
-        tk.Scale(row, from_=0.5, to=5.0, resolution=0.1, orient=tk.HORIZONTAL,
-                 variable=self.sigma_var, length=150).pack(side=tk.LEFT)
-        tk.Button(f2, text="高斯滤波去噪", width=18,
-                  command=lambda: self.apply_op(lambda im: gaussian_denoise(im, self.sigma_var.get()),
-                                                "高斯滤波去噪")).pack(pady=2)
+        self._slider(row, self.sigma_var, 0.5, 5.0, 0.1, 135).pack(side=tk.LEFT, padx=6)
+        self._btn(f2, "高斯滤波去噪",
+                  lambda: self.apply_op(lambda im: gaussian_denoise(im, self.sigma_var.get()),
+                                        "高斯滤波去噪")).pack(fill=tk.X, padx=11, pady=(3, 8))
 
         # ③ 边缘提取
-        f3 = tk.LabelFrame(ctrl, text="③ 边缘提取（6 种算子）")
-        f3.pack(fill=tk.X, pady=3)
-        grid = tk.Frame(f3); grid.pack(padx=4)
+        f3 = self._card(ctrl, "③　边缘提取（6 种算子）")
+        f3.pack(fill=tk.X, pady=(0, 10))
+        grid = tk.Frame(f3, bg=self.C_CARD)
+        grid.pack(fill=tk.X, padx=11, pady=(4, 0))
+        for c in range(3):
+            grid.columnconfigure(c, weight=1)
         edges = [("Sobel", edge_sobel), ("Prewitt", edge_prewitt), ("Roberts", edge_roberts),
                  ("Laplacian", edge_laplacian), ("LoG", edge_log), ("Canny", edge_canny)]
         for i, (name, func) in enumerate(edges):
-            tk.Button(grid, text=name, width=9,
-                      command=lambda f=func, n=name: self.apply_op(f, n + " 边缘提取")
-                      ).grid(row=i // 3, column=i % 3, padx=3, pady=2)
-        tk.Button(f3, text="全部边缘结果对比", width=26, command=self.edge_compare).pack(pady=4)
+            self._btn(grid, name, lambda f=func, n=name: self.apply_op(f, n + " 边缘提取")
+                      ).grid(row=i // 3, column=i % 3, padx=2, pady=2, sticky="ew")
+        self._btn(f3, "全部边缘结果对比", self.edge_compare).pack(fill=tk.X, padx=11, pady=(4, 8))
 
         # ④ 图像分割
-        f4 = tk.LabelFrame(ctrl, text="④ 图像分割")
-        f4.pack(fill=tk.X, pady=3)
-        tk.Button(f4, text="Otsu 阈值分割", width=18, command=self.do_otsu).pack(pady=2)
-        row = tk.Frame(f4); row.pack(fill=tk.X, padx=4)
-        tk.Label(row, text="分水岭前景系数:").pack(side=tk.LEFT)
+        f4 = self._card(ctrl, "④　图像分割")
+        f4.pack(fill=tk.X, pady=(0, 10))
+        self._btn(f4, "Otsu 阈值分割", self.do_otsu).pack(fill=tk.X, padx=11, pady=(4, 3))
+        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        self._lab(row, "分水岭前景系数", size=9).pack(side=tk.LEFT)
         self.fgcoef_var = tk.DoubleVar(value=0.35)
-        tk.Scale(row, from_=0.10, to=0.60, resolution=0.05, orient=tk.HORIZONTAL,
-                 variable=self.fgcoef_var, length=150).pack(side=tk.LEFT)
-        tk.Button(f4, text="自适应分水岭分割", width=18, command=self.do_watershed).pack(pady=2)
-        tk.Button(f4, text="组合式分割(创新)", width=18, command=self.do_combined).pack(pady=2)
-        tk.Button(f4, text="分割方法结果对比", width=26, command=self.seg_compare).pack(pady=4)
+        self._slider(row, self.fgcoef_var, 0.10, 0.60, 0.05, 135).pack(side=tk.LEFT, padx=6)
+        self._btn(f4, "自适应分水岭分割", self.do_watershed).pack(fill=tk.X, padx=11, pady=3)
+        self._btn(f4, "组合式分割（创新）", self.do_combined).pack(fill=tk.X, padx=11, pady=3)
+        self._btn(f4, "分割方法结果对比", self.seg_compare).pack(fill=tk.X, padx=11, pady=(3, 8))
 
         # ---------------- 右侧显示区 ----------------
-        disp = tk.Frame(body)
-        disp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        disp = tk.Frame(body, bg=self.C_BG)
+        disp.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12), pady=10)
 
-        top = tk.Frame(disp)
+        top = tk.Frame(disp, bg=self.C_BG)
         top.pack(fill=tk.BOTH, expand=True)
-        lf1 = tk.LabelFrame(top, text="原始图像 / 处理前")
-        lf1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=3)
-        self.canvas_orig = tk.Canvas(lf1, width=480, height=480, bg="#222")
-        self.canvas_orig.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        lf2 = tk.LabelFrame(top, text="处理结果 / 处理后")
-        lf2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=3)
-        bar2 = tk.Frame(lf2)
-        bar2.pack(fill=tk.X, padx=4, pady=(4, 0))
-        tk.Button(bar2, text="放大", width=5, command=lambda: self._zoom_res(1.25)).pack(side=tk.LEFT, padx=2)
-        tk.Button(bar2, text="缩小", width=5, command=lambda: self._zoom_res(0.8)).pack(side=tk.LEFT, padx=2)
-        tk.Button(bar2, text="适应", width=5,
-                  command=lambda: (self._reset_res_view(), self._redraw_all())).pack(side=tk.LEFT, padx=2)
-        tk.Label(bar2, text="左右联动：滚轮=缩放 拖动=平移 双击=复位", fg="#777",
-                 font=("", 8)).pack(side=tk.LEFT, padx=6)
-        self.canvas_res = tk.Canvas(lf2, width=480, height=480, bg="#222")
-        self.canvas_res.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        lf1 = self._card(top, "原始图像")
+        lf1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        self.canvas_orig = tk.Canvas(lf1, width=480, height=480, bg=self.C_CANVAS,
+                                     highlightthickness=0, bd=0)
+        self.canvas_orig.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        cmp = tk.LabelFrame(disp, text="多算法结果对比区（滚轮/滚动条查看全部结果）")
-        cmp.pack(fill=tk.BOTH, expand=True, pady=4)
+        lf2 = self._card(top, "处理结果")
+        lf2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        bar2 = tk.Frame(lf2, bg=self.C_CARD)
+        bar2.pack(fill=tk.X, padx=10, pady=(6, 0))
+        self._btn(bar2, "放大", lambda: self._zoom_res(1.25), width=5, size=9).pack(side=tk.LEFT, padx=2)
+        self._btn(bar2, "缩小", lambda: self._zoom_res(0.8), width=5, size=9).pack(side=tk.LEFT, padx=2)
+        self._btn(bar2, "适应",
+                  lambda: (self._reset_res_view(), self._redraw_all()), width=5, size=9
+                  ).pack(side=tk.LEFT, padx=2)
+        self._lab(bar2, "滚轮=缩放  拖动=平移  双击=复位", size=8, fg=self.C_SUB).pack(side=tk.LEFT, padx=8)
+        self.canvas_res = tk.Canvas(lf2, width=480, height=480, bg=self.C_CANVAS,
+                                    highlightthickness=0, bd=0)
+        self.canvas_res.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
+
+        cmp = self._card(disp, "多算法结果对比区")
+        cmp.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
         # 可滚动容器：缩略图多于一屏时，用右侧滚动条或鼠标滚轮滚动查看
-        cmp_wrap = tk.Frame(cmp)
-        cmp_wrap.pack(fill=tk.BOTH, expand=True)
-        self.cmp_canvas = tk.Canvas(cmp_wrap, highlightthickness=0)
-        self.cmp_scroll = tk.Scrollbar(cmp_wrap, orient=tk.VERTICAL,
-                                       command=self.cmp_canvas.yview)
+        cmp_wrap = tk.Frame(cmp, bg=self.C_CARD)
+        cmp_wrap.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.cmp_canvas = tk.Canvas(cmp_wrap, bg=self.C_CARD, highlightthickness=0)
+        self.cmp_scroll = tk.Scrollbar(cmp_wrap, orient=tk.VERTICAL, width=10,
+                                       command=self.cmp_canvas.yview, bg="#D9D9E0",
+                                       troughcolor=self.C_CARD, bd=0, highlightthickness=0,
+                                       activebackground=self.C_SUB)
         self.cmp_canvas.configure(yscrollcommand=self.cmp_scroll.set)
         self.cmp_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.cmp_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         # 缩略图内容框架放入画布窗口，作为滚动区域
-        self.cmp_frame = tk.Frame(self.cmp_canvas)
+        self.cmp_frame = tk.Frame(self.cmp_canvas, bg=self.C_CARD)
         self._cmp_window = self.cmp_canvas.create_window((0, 0), window=self.cmp_frame, anchor="nw")
         # 内容尺寸变化时更新滚动范围；画布宽度变化时内容窗口跟随
         self.cmp_frame.bind("<Configure>", self._on_cmp_configure)
@@ -818,7 +892,7 @@ class CellSegGUI(tk.Tk):
             w.destroy()
         # 重建窗口项/框架，避免旧内容把画布窗口项的尺寸钉住导致滚动区域无法收缩
         self.cmp_canvas.delete(self._cmp_window)
-        self.cmp_frame = tk.Frame(self.cmp_canvas)
+        self.cmp_frame = tk.Frame(self.cmp_canvas, bg=self.C_CARD)
         self._cmp_window = self.cmp_canvas.create_window((0, 0), window=self.cmp_frame, anchor="nw")
         self.cmp_frame.bind("<Configure>", self._on_cmp_configure)
         self.cmp_canvas.yview_moveto(0)
@@ -833,11 +907,13 @@ class CellSegGUI(tk.Tk):
         self._clear_compare()
         boxes = []
         for i, (title, arr) in enumerate(entries):
-            box = tk.Frame(self.cmp_frame, bd=1, relief=tk.SUNKEN)
+            box = tk.Frame(self.cmp_frame, bg=self.C_CARD, bd=0,
+                           highlightthickness=1, highlightbackground=self.C_LINE)
             box.grid(row=i // 4, column=i % 4, padx=4, pady=4)   # 每行 4 个缩略图
-            tk.Label(box, text=title, font=("", 9)).pack()
-            cv = tk.Canvas(box, width=200, height=200, bg="#333")
-            cv.pack()
+            self._lab(box, title, size=9).pack(padx=2, pady=(2, 0))
+            cv = tk.Canvas(box, width=200, height=200, bg=self.C_CANVAS,
+                           highlightthickness=0, bd=0)
+            cv.pack(padx=4, pady=4)
             # 滚轮悬停在缩略图上也能滚动对比区
             self._bind_scroll_wheel(box)
             self._bind_scroll_wheel(cv)

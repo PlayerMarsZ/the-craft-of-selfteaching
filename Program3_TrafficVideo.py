@@ -16,6 +16,7 @@
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinter import font as tkfont
 
 import cv2
 import numpy as np
@@ -23,13 +24,29 @@ from PIL import Image, ImageTk
 
 
 class TrafficGUI(tk.Tk):
-    """交通视频监控系统主界面"""
+    """交通视频监控系统主界面（macOS 风格：浅灰底 + 卡片 + 扁平按钮 + 系统蓝强调色）"""
+
+    # -------- macOS 设计规范：颜色 --------
+    C_BG     = "#F2F2F7"
+    C_CARD   = "#FFFFFF"
+    C_TEXT   = "#1D1D1F"
+    C_SUB    = "#8E8E93"
+    C_ACCENT = "#0A84FF"
+    C_ACC_D  = "#0068DA"
+    C_BTN    = "#E8E8ED"
+    C_BTN_D  = "#D9D9E0"
+    C_LINE   = "#E3E3E8"
+    C_OK     = "#2FBF5F"
+    C_CANVAS = "#1C1C1E"
+    GLASS    = "#FAFAFC"
 
     def __init__(self):
         super().__init__()
         self.title("交通视频监控系统")
         self.geometry("1000x660")
         self.minsize(820, 500)
+        self.configure(bg=self.C_BG)
+        self._setup_fonts()
 
         self.cap = None            # OpenCV 视频捕获对象
         self.fps = 25.0            # 视频帧率
@@ -41,42 +58,94 @@ class TrafficGUI(tk.Tk):
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    # ------------------------- 主题（字体 / 控件工厂） -------------------------
+
+    def _setup_fonts(self):
+        """英文优先 Inter-Medium，中文优先苹方中等（PingFang SC Medium），未安装时逐级回退"""
+        avail = set(tkfont.families(self))
+
+        def pick(candidates, fallback):
+            for c in candidates:
+                if c in avail:
+                    return c
+            return fallback
+
+        self.f_en = pick(["Inter-Medium", "Inter Medium", "Inter",
+                          "SF Pro Text", "Helvetica Neue", "Segoe UI"], "Arial")
+        self.f_cn = pick(["PingFang SC Medium", "PingFangSC-Medium", "PingFang SC",
+                          "Microsoft YaHei UI", "Microsoft YaHei",
+                          "Noto Sans CJK SC", "WenQuanYi Micro Hei"], "SimHei")
+
+    def F(self, size, bold=False, eng=False):
+        """界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
+        return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
+
+    def _btn(self, parent, text, command, primary=False, width=None, size=10, bold=False):
+        """macOS 风格扁平按钮：primary=True 蓝底白字，否则浅灰底深字"""
+        bg = self.C_ACCENT if primary else self.C_BTN
+        ab = self.C_ACC_D if primary else self.C_BTN_D
+        fg = "#FFFFFF" if primary else self.C_TEXT
+        return tk.Button(parent, text=text, command=command, width=width,
+                         relief=tk.FLAT, bd=0, highlightthickness=0,
+                         bg=bg, fg=fg, activebackground=ab, activeforeground=fg,
+                         font=self.F(size, bold), padx=10, pady=3, cursor="hand2")
+
+    def _lab(self, parent, text, size=10, fg=None, bold=False):
+        """文字标签：自动继承父面板底色"""
+        return tk.Label(parent, text=text, bg=parent["bg"], fg=fg or self.C_TEXT,
+                        font=self.F(size, bold))
+
     # ------------------------- 界面搭建 -------------------------
 
     def _build_ui(self):
-        # 视频显示区
-        lf = tk.LabelFrame(self, text="监控画面")
-        lf.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self.canvas = tk.Canvas(lf, width=900, height=460, bg="#111")
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # 视频显示区（白色卡片 + 深色画布）
+        lf = tk.Frame(self, bg=self.C_CARD, bd=0,
+                      highlightthickness=1, highlightbackground=self.C_LINE)
+        lf.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 6))
+        tk.Label(lf, text="监控画面", bg=self.C_CARD, fg=self.C_TEXT,
+                 font=self.F(11, True, eng=True)).pack(anchor="w", padx=12, pady=(8, 2))
+        self.canvas = tk.Canvas(lf, width=900, height=460, bg=self.C_CANVAS,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # 信息栏
-        info_bar = tk.Frame(self)
-        info_bar.pack(fill=tk.X, padx=8)
-        tk.Label(info_bar, textvariable=self.info_var, anchor="w",
-                 font=("", 10)).pack(side=tk.LEFT, padx=4)
+        # 信息栏（白色卡片内浅灰文字）
+        info_card = tk.Frame(self, bg=self.C_CARD, bd=0,
+                             highlightthickness=1, highlightbackground=self.C_LINE)
+        info_card.pack(fill=tk.X, padx=12, pady=(6, 0))
+        tk.Label(info_card, textvariable=self.info_var, anchor="w", bg=self.C_CARD,
+                 fg=self.C_SUB, font=self.F(10, eng=True), padx=12, pady=6).pack(fill=tk.X)
 
-        # 控制栏
-        bar = tk.Frame(self, bd=2, relief=tk.RAISED)
+        # 控制栏（macOS 风格：细线分隔 + 浅色底）
+        tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
+        bar = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        tk.Button(bar, text="打开视频", width=12, command=self.open_video).pack(side=tk.LEFT, padx=6, pady=6)
-        self.btn_play = tk.Button(bar, text="▶ 播放", width=10, command=self.toggle_play)
-        self.btn_play.pack(side=tk.LEFT, padx=4, pady=6)
-        tk.Button(bar, text="停止", width=8, command=self.stop).pack(side=tk.LEFT, padx=4, pady=6)
-        tk.Button(bar, text="快进×2", width=8, command=self.set_fast).pack(side=tk.LEFT, padx=4, pady=6)
-        tk.Button(bar, text="慢放×0.5", width=9, command=self.set_slow).pack(side=tk.LEFT, padx=4, pady=6)
+        self._btn(bar, "打开视频", self.open_video, primary=True, width=11).pack(
+            side=tk.LEFT, padx=(14, 5), pady=9)
+        self.btn_play = self._btn(bar, "▶ 播放", self.toggle_play, width=9, size=10, bold=True)
+        self.btn_play.pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "停止", self.stop, width=7).pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "快进×2", self.set_fast, width=8).pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "慢放×0.5", self.set_slow, width=8).pack(side=tk.LEFT, padx=5, pady=9)
 
-        tk.Label(bar, text="播放速度:").pack(side=tk.LEFT, padx=(16, 0))
+        self._lab(bar, "播放速度", size=9).pack(side=tk.LEFT, padx=(14, 0))
         self.speed_var = tk.DoubleVar(value=1.0)
         tk.Scale(bar, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
-                 variable=self.speed_var, length=220).pack(side=tk.LEFT, padx=4, pady=4)
+                 variable=self.speed_var, length=200,
+                 bg=self.GLASS, fg=self.C_TEXT, troughcolor=self.C_LINE,
+                 activebackground=self.C_ACCENT, highlightthickness=0, bd=0,
+                 font=self.F(9), sliderlength=14
+                 ).pack(side=tk.LEFT, padx=8, pady=8)
 
         self.loop_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="循环播放", variable=self.loop_var).pack(side=tk.LEFT, padx=10)
+        tk.Checkbutton(bar, text="循环播放", variable=self.loop_var,
+                       bg=self.GLASS, fg=self.C_TEXT, activebackground=self.GLASS,
+                       activeforeground=self.C_ACCENT, selectcolor=self.C_CARD,
+                       highlightthickness=0, bd=0, font=self.F(10)
+                       ).pack(side=tk.LEFT, padx=10, pady=9)
 
-        tk.Label(bar, textvariable=self.status_var, anchor="e", fg="#05a").pack(
-            side=tk.RIGHT, padx=10)
+        tk.Label(bar, textvariable=self.status_var, anchor="e", bg=self.GLASS,
+                 fg=self.C_OK, font=self.F(9)).pack(side=tk.RIGHT, padx=12)
 
     # ------------------------- 视频开关 -------------------------
 
