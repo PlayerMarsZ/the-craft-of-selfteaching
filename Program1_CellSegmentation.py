@@ -525,12 +525,14 @@ def otsu_foreground(img):
 
 def watershed_segment(img, fg_coef=0.35):
     """
-    自适应分水岭分割（标准 marker-based 流程）：
+    自适应分水岭分割（标准 marker-based 流程 + 噪声稳健性改进）：
     1) Otsu 自动极性粗分割得到对象掩膜（自适应，无需人工设阈值）；
-    2) 开运算去细噪声 → 膨胀确定背景（sure_bg）；
+    2) 开运算去细噪声 → 去除面积过小的碎块 → 膨胀确定背景（sure_bg）；
     3) 对【二值掩膜】做距离变换（对象中心距离最大），
        按距离最大值的比例自适应确定前景标记（fg_coef 越大标记越少）；
-    4) 分水岭变换在平滑灰度图上生长，输出随机着色分割图，红色线为边界。
+       若标记过多（纹理噪声强）则自动提高阈值，把种子数控制在合理范围；
+    4) 分水岭变换在平滑灰度图上生长；合并面积过小的最终区域到相邻主区域；
+    输出随机着色分割图，红色线为边界，背景为浅灰。
     """
     if not HAS_CV2:
         raise RuntimeError("分水岭分割需要 OpenCV：pip install opencv-python")
@@ -539,14 +541,39 @@ def watershed_segment(img, fg_coef=0.35):
     mask = otsu_foreground(gray)        # 255=对象（Otsu 自适应极性）
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     opening = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)   # 去细噪声
+    # 去除面积过小的碎块（与图像尺寸自适应），避免纹理噪声产生成百上千个小区域
+    min_area = max(25, int(gray.size * 0.0001))
+    n0, lab0, stats0, _ = cv2.connectedComponentsWithStats(opening, 8)
+    filtered = np.zeros_like(opening)
+    for i in range(1, n0):
+        if stats0[i, cv2.CC_STAT_AREA] >= min_area:
+            filtered[lab0 == i] = 255
+    opening = filtered
     sure_bg = cv2.dilate(opening, kernel, iterations=3)                      # 确定背景
     # 对二值掩膜做距离变换：对象中心处距离最大，是可靠的前景标记位置
     dist = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
+    if dist.max() <= 0:
+        edge = cv2.Canny(mask, 80, 160)          # 掩膜为空：用 Otsu 轮廓兜底
+        vis = np.zeros(gray.shape + (3,), np.uint8)
+        vis[:] = (250, 250, 250)
+        vis[edge > 0] = (0, 0, 255)
+        return vis, 0
     # 自适应阈值：按距离图最大值的比例确定前景，避免人为设定绝对阈值
     th = fg_coef * dist.max()
     _, sure_fg = cv2.threshold(dist, th, 255, cv2.THRESH_BINARY)
     sure_fg = sure_fg.astype(np.uint8)
-    unknown = cv2.subtract(sure_bg, sure_fg)   # 对象边缘带：待分水岭竞争分配
+    # 标记数量自适应控制：种子过多说明纹理噪声强，二分提高阈值（至多 0.95）把种子数压到 64 以内
+    n_seeds = cv2.connectedComponents(sure_fg)[0] - 1
+    if n_seeds > 64:
+        lo, hi = fg_coef, 0.95
+        for _ in range(14):
+            mid = (lo + hi) / 2.0
+            _, sf = cv2.threshold(dist, mid * dist.max(), 255, cv2.THRESH_BINARY)
+            cnt = cv2.connectedComponents(sf)[0] - 1
+            if cnt > 64:
+                lo = mid
+            else:
+                hi, sure_fg = mid, np.uint8(sf)
     n, markers = cv2.connectedComponents(sure_fg)
     if n <= 1:                  # 前景系数过高未找到标记时，用 Otsu 轮廓作兜底显示
         edge = cv2.Canny(mask, 80, 160)
@@ -554,6 +581,7 @@ def watershed_segment(img, fg_coef=0.35):
         vis[:] = (250, 250, 250)
         vis[edge > 0] = (0, 0, 255)
         return vis, 0
+    unknown = cv2.subtract(sure_bg, sure_fg)   # 对象边缘带：待分水岭竞争分配
     markers = markers + 1                 # 背景标记为 1
     markers[unknown == 255] = 0           # 未知区域标记为 0
     # 在平滑灰度图上运行分水岭：未知区域由背景与各前景标记竞争生长
@@ -561,6 +589,21 @@ def watershed_segment(img, fg_coef=0.35):
 
     labels = markers.copy()
     labels[labels == -1] = 0              # 分水岭脊线（边界）
+    # 合并过小区域：面积小于阈值的区域并入其边界邻域中出现最多的区域（小碎块 → 主区域）
+    small_area = max(20, int(gray.size * 0.00005))
+    areas = np.bincount(labels.ravel(), minlength=labels.max() + 1)
+    dil_k = np.ones((3, 3), np.uint8)
+    for lab in range(2, labels.max() + 1):
+        if areas[lab] < small_area:
+            m = (labels == lab)
+            ring = cv2.dilate(m.astype(np.uint8), dil_k) & ~m
+            nb = labels[ring]
+            nb = nb[nb > 1]               # 不并入脊线(0)与背景(1)以外的统计
+            if isinstance(nb, np.ndarray) and len(nb):
+                rep = int(np.bincount(nb).argmax())   # 邻域主标签
+            else:
+                rep = 1                   # 无相邻区域时并入背景
+            labels[m] = rep
     n_lab = int(labels.max()) - 1         # 前景区域个数（不含背景标记 1）
     rng = np.random.default_rng(42)
     palette = {0: np.array([0, 0, 255], np.uint8),      # 边界：红色
