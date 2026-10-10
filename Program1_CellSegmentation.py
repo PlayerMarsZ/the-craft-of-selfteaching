@@ -618,6 +618,16 @@ class CellSegGUI(tk.Tk):
         self._build_body()
         self._bind_crop()
         self._bind_res_view()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def on_close(self):
+        """关闭窗口：先取消待执行的对比区重排定时器，避免退出时报无意义的定时器错误"""
+        if self._cmp_reflow_id:
+            try:
+                self.after_cancel(self._cmp_reflow_id)
+            except Exception:
+                pass
+        self.destroy()
 
     # ------------------------- 主题（字体 / 控件工厂） -------------------------
 
@@ -1229,16 +1239,28 @@ class CellSegGUI(tk.Tk):
         """entries: [(标题, 图像数组)]，以缩略图网格自适应排版显示在对比区（可滚动查看全部）"""
         self._clear_compare()
         self._last_entries = entries    # 记录内容，窗口尺寸变化时自动重排
-        # 自适应排版：在 1~4 列中选择“图片最大且几乎填满宽度”的布局（缩略图 150~420px）
-        avail = (self.cmp_canvas.winfo_width() or 900)
-        cols, thumb = 1, 150
+        # 自适应排版：在“宽度填充 ≥90%”的前提下选图片最大的列布局（缩略图 150~420px）
+        avail = self.cmp_canvas.winfo_width()
+        if not avail or avail <= 1:          # 画布尚未完成布局时按常规宽度估算
+            avail = 960
+        best_cols, best_thumb = 1, 0
         for c in (1, 2, 3, 4):
             cost = 24 * c + 8 * (c - 1) + 8   # 卡片内外边距 + 网格间距 + 边框
-            t = (avail - cost) // c
-            if 150 <= t <= 420:
-                cols, thumb = c, t
-                break
-        thumb = min(max(120, thumb), max(120, avail - 30))   # 兜底：至少留出 30px 边距
+            t = min((avail - cost) // c, 420)
+            if t < 150:
+                continue
+            if t * c + cost >= avail * 0.90 and t > best_thumb:
+                best_cols, best_thumb = c, t
+        if best_thumb == 0:                  # 无满足 90% 填充的布局时退化为单列大图
+            best_cols, best_thumb = 1, max(140, min(420, avail - 32))
+        cols, thumb = best_cols, best_thumb
+        # 布局定版后按真实画布宽度自动重排一次（保险：防止首帧按估算宽度排版）
+        if self._cmp_reflow_id:
+            try:
+                self.after_cancel(self._cmp_reflow_id)
+            except Exception:
+                pass
+        self._cmp_reflow_id = self.after(260, self._reflow_compare)
         boxes = []
         for i, (title, arr) in enumerate(entries):
             box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=5)
