@@ -305,6 +305,10 @@ class CellSegGUI(tk.Tk):
         self.crop_mode = False      # 是否处于裁剪框选状态
         self.crop_start = None      # 裁剪起点（画布坐标）
         self.crop_rect = None       # 裁剪预览矩形
+        self._scale_base = None     # 缩放拖动时的基准图像
+        self._scale_base_val = 1.0  # 基准图像对应的滑块值
+        self._rot_base = None       # 旋转拖动时的基准图像
+        self._rot_base_val = 0.0    # 基准图像对应的滑块角度
         self.result_text = tk.StringVar(value="提示：点击【生成示例细胞图】即可无图演示")
 
         self._build_toolbar()
@@ -341,15 +345,23 @@ class CellSegGUI(tk.Tk):
         row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
         tk.Label(row, text="缩放:").pack(side=tk.LEFT)
         self.scale_var = tk.DoubleVar(value=1.0)
-        tk.Scale(row, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
-                 variable=self.scale_var, length=170).pack(side=tk.LEFT)
+        self.scale_slider = tk.Scale(row, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
+                                     variable=self.scale_var, length=170, command=self._on_scale)
+        self.scale_slider.pack(side=tk.LEFT)
+        # 按下时锁定基准（此时值尚未被拖动改变），松开时自动应用
+        self.scale_slider.bind("<ButtonPress-1>", self._scale_begin)
+        self.scale_slider.bind("<ButtonRelease-1>", self._scale_release)
         tk.Button(f1, text="应用缩放", width=18, command=self.do_scale).pack(pady=2)
 
         row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
         tk.Label(row, text="旋转:").pack(side=tk.LEFT)
-        self.rot_var = tk.DoubleVar(value=30.0)
-        tk.Scale(row, from_=-180, to=180, resolution=1, orient=tk.HORIZONTAL,
-                 variable=self.rot_var, length=170).pack(side=tk.LEFT)
+        self.rot_var = tk.DoubleVar(value=0.0)
+        self.rot_slider = tk.Scale(row, from_=-180, to=180, resolution=1, orient=tk.HORIZONTAL,
+                                   variable=self.rot_var, length=170, command=self._on_rotate)
+        self.rot_slider.pack(side=tk.LEFT)
+        # 与缩放相同的按下锁定/松开应用交互
+        self.rot_slider.bind("<ButtonPress-1>", self._rot_begin)
+        self.rot_slider.bind("<ButtonRelease-1>", self._rot_release)
         tk.Button(f1, text="应用旋转", width=18, command=self.do_rotate).pack(pady=2)
 
         self.crop_btn = tk.Button(f1, text="裁剪（在原图上拖拽框选区域）", width=30, command=self.toggle_crop)
@@ -457,6 +469,11 @@ class CellSegGUI(tk.Tk):
 
     def _new_image_loaded(self):
         self.current = self.original.copy()
+        self._reset_preview_bases()     # 新图像：缩放/旋转滑块基准清零
+        # 新图像把比例/角度滑块复位到“不缩放/不旋转”位置，保证滑块读数含义一致
+        self.scale_var.set(1.0)
+        self.rot_var.set(0.0)
+        self._reset_preview_bases()     # 清除 set() 触发回调时锁定的临时基准
         self.crop_mode = False
         self.crop_btn.config(text="裁剪（在原图上拖拽框选区域）")
         self.canvas_orig.config(cursor="")
@@ -503,6 +520,7 @@ class CellSegGUI(tk.Tk):
         if self.original is None:
             return
         self.current = self.original.copy()
+        self._reset_preview_bases()
         self._clear_compare()
         self.result_text.set("已重置为原始图像")
         self.update_display()
@@ -547,16 +565,114 @@ class CellSegGUI(tk.Tk):
             return
         self.result_text.set("当前操作: %s（尺寸 %d×%d）" %
                              (name, self.current.shape[1], self.current.shape[0]))
+        self._reset_preview_bases()
         self._clear_compare()
         self.update_display()
 
+    # --------------------- 缩放 / 旋转（滑块实时预览 + 按钮提交） ---------------------
+
+    def _reset_preview_bases(self):
+        """处理操作改变当前图像后调用：让滑块下次拖动以新图像为基准重新锁定"""
+        self._scale_base = None
+        self._rot_base = None
+
+    def _scale_begin(self, _e=None):
+        """按下缩放滑块：锁定本轮拖动的基准图像与基准比例。
+        该事件先于滑块值改变触发，因此记录的是拖动前的比例（绝对比例语义）"""
+        if self.current is None:
+            return
+        self._scale_base = self.current.copy()
+        self._scale_base_val = self.scale_var.get()
+
+    def _scale_release(self, _e=None):
+        """松开缩放滑块：自动把当前预览提交为正式结果（习惯按钮的也可点【应用缩放】）"""
+        if self._scale_base is not None:
+            self.do_scale()
+
+    def _on_scale(self, *_):
+        """缩放滑块回调：按 v/拖动前基准 实时预览缩放效果"""
+        if self.current is None:
+            return
+        try:
+            if self._scale_base is None:      # 未锁定基准（如方向键调节）：以当前值作基准
+                self._scale_base = self.current.copy()
+                self._scale_base_val = self.scale_var.get()
+            out = image_resize(self._scale_base, self.scale_var.get() / self._scale_base_val)
+            self._show(self.canvas_res, out, "res")
+        except Exception:
+            pass        # 预览失败不影响主流程
+
+    def _rot_begin(self, _e=None):
+        """按下旋转滑块：锁定本轮拖动的基准图像与基准角度"""
+        if self.current is None:
+            return
+        self._rot_base = self.current.copy()
+        self._rot_base_val = self.rot_var.get()
+
+    def _rot_release(self, _e=None):
+        """松开旋转滑块：自动提交预览结果"""
+        if self._rot_base is not None:
+            self.do_rotate()
+
+    def _on_rotate(self, *_):
+        """旋转滑块回调：按 (当前角度-拖动前角度) 实时预览旋转效果"""
+        if self.current is None:
+            return
+        try:
+            if self._rot_base is None:
+                self._rot_base = self.current.copy()
+                self._rot_base_val = self.rot_var.get()
+            out = image_rotate(self._rot_base, self.rot_var.get() - self._rot_base_val)
+            self._show(self.canvas_res, out, "res")
+        except Exception:
+            pass
+
     def do_scale(self):
-        self.apply_op(lambda im: image_resize(im, self.scale_var.get()),
-                      "缩放 %.2f 倍" % self.scale_var.get())
+        """应用缩放：把按下滑块后的预览结果提交为正式结果，滑块随后复位到 1.0（无变化位）。
+        语义：拖到 v 即相对“拖动开始时看到的图像”缩放 v 倍；要回原尺寸请点工具栏【重置】"""
+        if self.current is None:
+            messagebox.showwarning("提示", "请先打开图像")
+            return
+        try:
+            if self._scale_base is None:      # 未拖动滑块直接点按钮：以当前图像为基准
+                self._scale_base = self.current.copy()
+                self._scale_base_val = 1.0
+            # 实际比例 = 当前滑块值 / 拖动起点值（起点即复位后的 1.0）
+            ratio = self.scale_var.get() / self._scale_base_val
+            self.current = image_resize(self._scale_base, ratio)
+        except Exception as e:
+            messagebox.showerror("处理出错", str(e))
+            return
+        applied = ratio
+        self.scale_var.set(1.0)               # 滑块复位（set 触发的预览回调随后被基准清零覆盖）
+        self._reset_preview_bases()
+        self.result_text.set("缩放应用: %.2f 倍 → 尺寸 %d×%d（回原尺寸请点【重置】）" %
+                             (applied, self.current.shape[1], self.current.shape[0]))
+        self._clear_compare()
+        self.update_display()
 
     def do_rotate(self):
-        self.apply_op(lambda im: image_rotate(im, self.rot_var.get()),
-                      "旋转 %.0f°" % self.rot_var.get())
+        """应用旋转：把按下滑块后的预览结果提交为正式结果，滑块随后复位到 0°（无变化位）。
+        语义：拖到 θ° 即相对“拖动开始时看到的图像”旋转 θ 度"""
+        if self.current is None:
+            messagebox.showwarning("提示", "请先打开图像")
+            return
+        try:
+            if self._rot_base is None:        # 未拖动滑块直接点按钮：相对 0° 旋转
+                self._rot_base = self.current.copy()
+                self._rot_base_val = 0.0
+            angle = self.rot_var.get() - self._rot_base_val
+            self.current = image_rotate(self._rot_base, angle)
+        except Exception as e:
+            messagebox.showerror("处理出错", str(e))
+            return
+        applied = angle
+        self.rot_var.set(0.0)                 # 滑块复位（set 触发的预览回调随后被基准清零覆盖）
+        self._reset_preview_bases()
+        self.result_text.set("旋转应用: %.0f° → 尺寸 %d×%d" %
+                             (applied, self.current.shape[1], self.current.shape[0]))
+        self._clear_compare()
+        self.update_display()
 
     def _on_wl(self, *_):
         """窗宽窗位滑块回调：拖动滑块时把映射结果实时绘制到右侧画布，实现动态预览"""
@@ -575,6 +691,7 @@ class CellSegGUI(tk.Tk):
             return
         bw, T = otsu_threshold(self.current)
         self.current = bw
+        self._reset_preview_bases()
         self.result_text.set("Otsu 分割完成，自适应最佳阈值 T = %d" % T)
         self._clear_compare()
         self.update_display()
@@ -589,6 +706,7 @@ class CellSegGUI(tk.Tk):
             messagebox.showerror("缺少依赖", str(e))
             return
         self.current = ws
+        self._reset_preview_bases()
         self.result_text.set("自适应分水岭分割完成，共分割出 %d 个区域" % n)
         self._clear_compare()
         self.update_display()
@@ -604,6 +722,7 @@ class CellSegGUI(tk.Tk):
             messagebox.showerror("缺少依赖", str(e))
             return
         self.current = out
+        self._reset_preview_bases()
         self.result_text.set("组合式分割完成（自适应中值+Otsu+分水岭），%d 个区域" % n)
         self._clear_compare()
         self.update_display()
@@ -717,6 +836,7 @@ class CellSegGUI(tk.Tk):
             return
         # 直接对原始图像做区域切片（数组行/列区间取子块）
         self.current = self.original[y0:y1 + 1, x0:x1 + 1].copy()
+        self._reset_preview_bases()
         self.result_text.set("裁剪完成（%d×%d）" % (self.current.shape[1], self.current.shape[0]))
         self._clear_compare()
         self.update_display()
