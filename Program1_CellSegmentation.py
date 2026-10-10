@@ -302,6 +302,9 @@ class CellSegGUI(tk.Tk):
         self.original = None        # 原始图像数组
         self.current = None         # 当前处理结果数组
         self.disp_info = {}         # 画布显示映射 {tag:(scale,offx,offy,iw,ih)}
+        self.view = {"res": {"zoom": 1.0, "dx": 0, "dy": 0}}   # 结果区视图状态（倍率/平移量）
+        self._res_view_arr = None  # 结果区最近一次绘制的图像（供缩放/平移即时重绘）
+        self._res_drag = None      # 结果区拖动起点坐标
         self.crop_mode = False      # 是否处于裁剪框选状态
         self.crop_start = None      # 裁剪起点（画布坐标）
         self.crop_rect = None       # 裁剪预览矩形
@@ -314,6 +317,7 @@ class CellSegGUI(tk.Tk):
         self._build_toolbar()
         self._build_body()
         self._bind_crop()
+        self._bind_res_view()
 
     # ------------------------- 界面搭建 -------------------------
 
@@ -439,6 +443,14 @@ class CellSegGUI(tk.Tk):
         self.canvas_orig.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         lf2 = tk.LabelFrame(top, text="处理结果 / 处理后")
         lf2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=3)
+        bar2 = tk.Frame(lf2)
+        bar2.pack(fill=tk.X, padx=4, pady=(4, 0))
+        tk.Button(bar2, text="放大", width=5, command=lambda: self._zoom_res(1.25)).pack(side=tk.LEFT, padx=2)
+        tk.Button(bar2, text="缩小", width=5, command=lambda: self._zoom_res(0.8)).pack(side=tk.LEFT, padx=2)
+        tk.Button(bar2, text="适应", width=5,
+                  command=lambda: (self._reset_res_view(), self._redraw_res())).pack(side=tk.LEFT, padx=2)
+        tk.Label(bar2, text="滚轮=缩放  拖动=平移  双击=复位", fg="#777",
+                 font=("", 8)).pack(side=tk.LEFT, padx=6)
         self.canvas_res = tk.Canvas(lf2, width=480, height=480, bg="#222")
         self.canvas_res.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
@@ -534,20 +546,43 @@ class CellSegGUI(tk.Tk):
             self._show(self.canvas_res, self.current, "res")
 
     def _show(self, canvas, arr, tag, fallback=480):
-        """把 numpy 图像等比例缩放后绘制到指定画布中央"""
+        """把 numpy 图像等比例缩放后绘制到指定画布中央；
+        结果区(res)额外支持视图缩放/平移，放大后图像可超出画布边框，被裁部分可拖动查看"""
         cw = canvas.winfo_width() or fallback
         ch = canvas.winfo_height() or fallback
         pil = Image.fromarray(np.asarray(arr))
-        # 取宽高两个方向的小比例，保证整图放入画布且不变形
-        r = min(cw / pil.width, ch / pil.height, 1.0)
+        # 基础适配比例：保证整图放入画布且不变形
+        r0 = min(cw / pil.width, ch / pil.height, 1.0)
+        if tag == "res":
+            v = self.view.setdefault("res", {"zoom": 1.0, "dx": 0, "dy": 0})
+            zoom = max(0.2, min(16.0, v["zoom"]))   # 1=适应窗口；>1 时图像超出画布边框
+            dx, dy = v["dx"], v["dy"]
+            self._res_view_arr = arr                # 记录最近绘制的图像供缩放/平移重绘
+        else:
+            zoom, dx, dy = 1.0, 0, 0
+        r = r0 * zoom
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
-        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS))
+        # 高倍放大用最近邻重采样：重绘快且便于观察像素网格；缩小用高质量重采样
+        if zoom >= 2.0:
+            resample = Image.NEAREST
+        elif zoom >= 1.0:
+            resample = Image.BILINEAR
+        else:
+            resample = Image.LANCZOS
+        photo = ImageTk.PhotoImage(pil.resize((w, h), resample))
         canvas.delete("all")
-        canvas.create_image(cw // 2, ch // 2, image=photo)   # 画布居中
+        if tag == "res":
+            # 平移限幅：图像超出画布的部分可自由拖动，否则吸附回居中位置，防止图像拖丢
+            max_dx = max(0.0, (w - cw) / 2.0 + 60.0)
+            max_dy = max(0.0, (h - ch) / 2.0 + 60.0)
+            dx = float(np.clip(dx, -max_dx, max_dx))
+            dy = float(np.clip(dy, -max_dy, max_dy))
+            v["dx"], v["dy"] = dx, dy
+        canvas.create_image(cw // 2 + dx, ch // 2 + dy, image=photo)   # 中心+平移偏移
         canvas.photo = photo          # 保持引用防止被回收
-        # 记录缩放比例、居中偏移量与原图尺寸，供裁剪时做画布坐标→图像坐标换算
-        self.disp_info[tag] = (r, (cw - w) // 2, (ch - h) // 2, pil.width, pil.height)
+        # 记录缩放比例、偏移量与原图尺寸，供裁剪时做画布坐标→图像坐标换算
+        self.disp_info[tag] = (r, (cw - w) // 2 + dx, (ch - h) // 2 + dy, pil.width, pil.height)
 
     # ------------------------- 各类操作 -------------------------
 
@@ -572,9 +607,10 @@ class CellSegGUI(tk.Tk):
     # --------------------- 缩放 / 旋转（滑块实时预览 + 按钮提交） ---------------------
 
     def _reset_preview_bases(self):
-        """处理操作改变当前图像后调用：让滑块下次拖动以新图像为基准重新锁定"""
+        """处理操作改变当前图像后调用：滑块基准清零，结果区视图复位到适应窗口"""
         self._scale_base = None
         self._rot_base = None
+        self._reset_res_view()
 
     def _scale_begin(self, _e=None):
         """按下缩放滑块：锁定本轮拖动的基准图像与基准比例。
@@ -778,6 +814,84 @@ class CellSegGUI(tk.Tk):
             messagebox.showwarning("缺少依赖", str(e))
         self._show_compare(entries)
         self.result_text.set("已生成 Otsu / 分水岭 / 组合式分割结果对比")
+
+    # --------------------- 结果区放大预览（滚轮缩放 / 拖动平移 / 双击复位） ---------------------
+
+    def _bind_res_view(self):
+        """结果画布的缩放/平移事件绑定（原图区仍负责裁剪框选，互不干扰）"""
+        c = self.canvas_res
+        c.bind("<Enter>", lambda e: c.focus_set())       # Windows 上滚轮事件需要画布持有焦点
+        c.bind("<MouseWheel>", self._on_res_wheel)       # Windows / macOS 滚轮
+        c.bind("<Button-4>", self._on_res_wheel)         # Linux 滚轮向上
+        c.bind("<Button-5>", self._on_res_wheel)         # Linux 滚轮向下
+        c.bind("<ButtonPress-1>", self._on_res_press)
+        c.bind("<B1-Motion>", self._on_res_drag)
+        c.bind("<ButtonRelease-1>", self._on_res_release)
+        c.bind("<Double-Button-1>", self._on_res_dblclick)
+
+    def _on_res_wheel(self, e):
+        """滚轮缩放：向上放大、向下缩小（以光标所在位置为缩放锚点）"""
+        if getattr(e, "num", None) == 4:
+            factor = 1.2
+        elif getattr(e, "num", None) == 5:
+            factor = 1.0 / 1.2
+        else:                                           # e.delta > 0 表示向上滚动
+            factor = 1.2 if getattr(e, "delta", 0) > 0 else 1.0 / 1.2
+        self._zoom_res(factor, e.x, e.y)
+
+    def _zoom_res(self, factor, mx=None, my=None):
+        """按 factor 调整结果区显示倍率；mx/my 为锚点（缺省画布中心），缩放后锚点处图像保持不动"""
+        arr = self._res_view_arr
+        if arr is None:
+            return
+        v = self.view["res"]
+        z_old = v["zoom"]
+        z_new = min(16.0, max(0.2, z_old * factor))
+        if abs(z_new - z_old) < 1e-9:
+            return
+        cw = self.canvas_res.winfo_width() or 480
+        ch = self.canvas_res.winfo_height() or 480
+        if mx is None:
+            mx, my = cw / 2.0, ch / 2.0
+        # 锚点不动条件：光标下图像点相对画布中心的偏移，在缩放前后按比例保持不变
+        v["zoom"] = z_new
+        v["dx"] = (mx - cw / 2.0) - ((mx - cw / 2.0) - v["dx"]) / z_old * z_new
+        v["dy"] = (my - ch / 2.0) - ((my - ch / 2.0) - v["dy"]) / z_old * z_new
+        self._show(self.canvas_res, arr, "res")
+
+    def _reset_res_view(self):
+        """复位结果区视图：回到适应窗口、居中显示"""
+        self.view["res"] = {"zoom": 1.0, "dx": 0, "dy": 0}
+
+    def _redraw_res(self):
+        """按当前视图状态重绘结果区最近一次绘制的图像"""
+        if self._res_view_arr is not None:
+            self._show(self.canvas_res, self._res_view_arr, "res")
+
+    def _on_res_press(self, e):
+        """按下左键：进入拖动平移状态，记录起点并切换光标样式"""
+        self._res_drag = (e.x, e.y)
+        self.canvas_res.config(cursor="fleur")
+
+    def _on_res_drag(self, e):
+        """拖动平移：把放大后超出画布边框的图像部分拖入视野"""
+        if self._res_drag is None or self._res_view_arr is None:
+            return
+        v = self.view["res"]
+        v["dx"] += e.x - self._res_drag[0]
+        v["dy"] += e.y - self._res_drag[1]
+        self._res_drag = (e.x, e.y)
+        self._show(self.canvas_res, self._res_view_arr, "res")
+
+    def _on_res_release(self, _e):
+        """松开左键：结束平移"""
+        self._res_drag = None
+        self.canvas_res.config(cursor="")
+
+    def _on_res_dblclick(self, _e):
+        """双击：视图复位到适应窗口"""
+        self._reset_res_view()
+        self._redraw_res()
 
     # ------------------------- 裁剪交互 -------------------------
 
