@@ -568,16 +568,9 @@ class CellSegGUI(tk.Tk):
         else:
             zoom, dx, dy = 1.0, 0, 0
         r = r0 * zoom
+        # 完整显示尺寸只用于几何计算与坐标映射，不实际把整图缩放出来
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
-        # 高倍放大用最近邻重采样：重绘快且便于观察像素网格；缩小用高质量重采样
-        if zoom >= 2.0:
-            resample = Image.NEAREST
-        elif zoom >= 1.0:
-            resample = Image.BILINEAR
-        else:
-            resample = Image.LANCZOS
-        photo = ImageTk.PhotoImage(pil.resize((w, h), resample))
         canvas.delete("all")
         if shared:
             # 仅按本画布限幅绘制，不回写共享状态（共享状态在缩放/平移处理器中统一限幅）
@@ -585,10 +578,52 @@ class CellSegGUI(tk.Tk):
             max_dy = max(0.0, (h - ch) / 2.0 + 60.0)
             dx = float(np.clip(dx, -max_dx, max_dx))
             dy = float(np.clip(dy, -max_dy, max_dy))
-        canvas.create_image(cw // 2 + dx, ch // 2 + dy, image=photo)   # 中心+平移偏移
-        canvas.photo = photo          # 保持引用防止被回收
+        if shared and (w > cw or h > ch):
+            # 高倍预览：只裁取视野内的图像局部再缩放，避免对整幅大图超大尺寸重采样导致卡顿
+            self._draw_viewport(canvas, pil, r, cw, ch, dx, dy, zoom)
+        else:
+            # 整图能放入画布：直接缩放到显示尺寸（尺寸有限，开销小）
+            if zoom >= 2.0:
+                resample = Image.NEAREST
+            elif zoom >= 1.0:
+                resample = Image.BILINEAR
+            else:
+                resample = Image.LANCZOS
+            photo = ImageTk.PhotoImage(pil.resize((w, h), resample))
+            canvas.create_image(cw // 2 + dx, ch // 2 + dy, image=photo)
+            canvas.photo = photo          # 保持引用防止被回收
         # 记录缩放比例、偏移量与原图尺寸，供裁剪时做画布坐标→图像坐标换算
         self.disp_info[tag] = (r, (cw - w) // 2 + dx, (ch - h) // 2 + dy, pil.width, pil.height)
+
+    def _draw_viewport(self, canvas, pil, r, cw, ch, dx, dy, zoom):
+        """视野裁剪渲染：只把画布当前可见的图像局部裁剪并缩放到画布对应区域，
+        绘制开销只与画布尺寸相关，与图像尺寸/放大倍率无关，保证高倍缩放平移流畅"""
+        # 图像中心在画布上的位置（含平移偏移）
+        cx = cw / 2.0 + dx
+        cy = ch / 2.0 + dy
+        # 画布四角经“画布坐标→图像坐标”逆映射，得到可见的源图像区域
+        sx0 = (0.0 - cx) / r + pil.width / 2.0
+        sy0 = (0.0 - cy) / r + pil.height / 2.0
+        sx1 = (cw - cx) / r + pil.width / 2.0
+        sy1 = (ch - cy) / r + pil.height / 2.0
+        # 源区域取整并夹取到图像范围（图像边缘处可见区域小于画布）
+        ix0 = max(int(np.floor(sx0)), 0)
+        iy0 = max(int(np.floor(sy0)), 0)
+        ix1 = min(int(np.ceil(sx1)), pil.width)
+        iy1 = min(int(np.ceil(sy1)), pil.height)
+        if ix0 >= ix1 or iy0 >= iy1:
+            return          # 图像完全移出视野（正常情况下已被平移限幅避免）
+        crop = pil.crop((ix0, iy0, ix1, iy1))
+        tw = max(1, int(round((ix1 - ix0) * r)))
+        th = max(1, int(round((iy1 - iy0) * r)))
+        # 高倍观察用最近邻重采样，既快又便于观察像素；中低倍用双线性
+        resample = Image.NEAREST if zoom >= 2.0 else Image.BILINEAR
+        photo = ImageTk.PhotoImage(crop.resize((tw, th), resample))
+        # 裁剪区左上角在画布上的精确位置，用左上角锚点贴回原位
+        px = cx + (ix0 - pil.width / 2.0) * r
+        py = cy + (iy0 - pil.height / 2.0) * r
+        canvas.create_image(px, py, image=photo, anchor="nw")
+        canvas.photo = photo
 
     # ------------------------- 各类操作 -------------------------
 
