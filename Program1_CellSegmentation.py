@@ -100,6 +100,13 @@ class RCard(tk.Canvas):
         self.inner = tk.Frame(self, bg=fill)
         self._win = self.create_window((pad, pad), window=self.inner, anchor="nw")
         self.bind("<Configure>", self._redraw)
+        # 让画布期望尺寸跟随内部内容（Canvas 默认期望约 396x254，否则 grid 布局会被撑大）
+        self.inner.bind("<Configure>", self._sync_size)
+
+    def _sync_size(self, _e=None):
+        """画布期望尺寸 = 内容框架需求尺寸 + 内边距（供 grid 等按需布位）"""
+        self.config(width=self.inner.winfo_reqwidth() + 2 * self._pad,
+                    height=self.inner.winfo_reqheight() + 2 * self._pad)
 
     def _redraw(self, _e=None):
         """画布尺寸变化：重绘圆角背景并同步内容框架尺寸（window item 始终在上层）"""
@@ -603,8 +610,9 @@ class CellSegGUI(tk.Tk):
         self.f_en, self.f_cn = pick_fonts(self)
 
     def F(self, size, bold=False, eng=False):
-        """生成界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
-        return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
+        """生成界面字体：整体缩小一档（×0.86 后取整），避免界面字号偏大"""
+        s = max(7, int(round(size * 0.86)))
+        return (self.f_en if eng else self.f_cn, s, "bold" if bold else "normal")
 
     def _btn(self, parent, text, command, primary=False, width=None, size=10,
              bold=False, height=30, padx=16):
@@ -648,10 +656,25 @@ class CellSegGUI(tk.Tk):
         body = tk.Frame(self, bg=self.C_BG)
         body.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------- 左侧控制面板 ----------------
-        ctrl = tk.Frame(body, width=360, bg=self.C_BG)
-        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=(14, 6), pady=12)
-        ctrl.pack_propagate(False)
+        # ---------------- 左侧控制面板（可滚动） ----------------
+        ctrl_wrap = tk.Frame(body, width=370, bg=self.C_BG)
+        ctrl_wrap.pack(side=tk.LEFT, fill=tk.Y, padx=(14, 6), pady=12)
+        ctrl_wrap.pack_propagate(False)
+        self._ctrl_canvas = tk.Canvas(ctrl_wrap, bg=self.C_BG, highlightthickness=0)
+        self._ctrl_scroll = tk.Scrollbar(ctrl_wrap, orient=tk.VERTICAL, width=10,
+                                         command=self._ctrl_canvas.yview, bg="#D9D9E0",
+                                         troughcolor=self.C_BG, bd=0, highlightthickness=0,
+                                         activebackground=self.C_SUB)
+        self._ctrl_canvas.configure(yscrollcommand=self._ctrl_scroll.set)
+        self._ctrl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._ctrl_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ctrl = tk.Frame(self._ctrl_canvas, bg=self.C_BG)
+        self._ctrl_window = self._ctrl_canvas.create_window((0, 0), window=ctrl, anchor="nw")
+        # 内容高度变化时更新滚动范围；画布宽度变化时内容窗口跟随
+        ctrl.bind("<Configure>",
+                  lambda e: self._ctrl_canvas.configure(scrollregion=self._ctrl_canvas.bbox("all")))
+        self._ctrl_canvas.bind("<Configure>",
+                               lambda e: self._ctrl_canvas.itemconfigure(self._ctrl_window, width=e.width))
         FULL = self._btn_full        # 卡片内通栏按钮宽度（像素）
 
         # ① 基础操作
@@ -768,7 +791,7 @@ class CellSegGUI(tk.Tk):
 
         cmp = self._card(disp, "多算法结果对比区")
         cmp.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
-        # 可滚动容器：缩略图多于一屏时，用右侧滚动条或鼠标滚轮滚动查看
+        # 可滚动容器：缩略图多于一屏时，用滚动条或鼠标滚轮滚动查看（纵向+横向）
         cmp_wrap = tk.Frame(cmp.inner, bg=self.C_CARD)
         cmp_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.cmp_canvas = tk.Canvas(cmp_wrap, bg=self.C_CARD, highlightthickness=0)
@@ -776,8 +799,14 @@ class CellSegGUI(tk.Tk):
                                        command=self.cmp_canvas.yview, bg="#D9D9E0",
                                        troughcolor=self.C_CARD, bd=0, highlightthickness=0,
                                        activebackground=self.C_SUB)
-        self.cmp_canvas.configure(yscrollcommand=self.cmp_scroll.set)
+        self.cmp_scroll_h = tk.Scrollbar(cmp_wrap, orient=tk.HORIZONTAL, width=10,
+                                         command=self.cmp_canvas.xview, bg="#D9D9E0",
+                                         troughcolor=self.C_CARD, bd=0, highlightthickness=0,
+                                         activebackground=self.C_SUB)
+        self.cmp_canvas.configure(yscrollcommand=self.cmp_scroll.set,
+                                  xscrollcommand=self.cmp_scroll_h.set)
         self.cmp_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.cmp_scroll_h.pack(side=tk.BOTTOM, fill=tk.X)
         self.cmp_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         # 缩略图内容框架放入画布窗口，作为滚动区域
         self.cmp_frame = tk.Frame(self.cmp_canvas, bg=self.C_CARD)
@@ -786,6 +815,8 @@ class CellSegGUI(tk.Tk):
         self.cmp_frame.bind("<Configure>", self._on_cmp_configure)
         self.cmp_canvas.bind("<Configure>", self._on_cmp_resize)
         self._bind_scroll_wheel(self.cmp_canvas)
+        # 左侧面板滚轮滚动：绑定到面板及其全部子控件，悬停任意位置都能滚动
+        self._bind_ctrl_wheel(ctrl)
 
     # ------------------------- 图像读写 -------------------------
 
@@ -1151,14 +1182,17 @@ class CellSegGUI(tk.Tk):
     def _show_compare(self, entries):
         """entries: [(标题, 图像数组)]，以缩略图网格形式显示在对比区（可滚动查看全部）"""
         self._clear_compare()
+        # 缩略图尺寸按对比区实际宽度自适应（每行 4 个），防止右侧超出被裁掉
+        avail = (self.cmp_canvas.winfo_width() or 900) - 96
+        thumb = max(120, min(200, avail // 4))
         boxes = []
         for i, (title, arr) in enumerate(entries):
-            box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=6)
-            box.grid(row=i // 4, column=i % 4, padx=4, pady=4)   # 每行 4 个缩略图
-            self._lab(box.inner, title, size=9).pack(padx=2, pady=(2, 0))
-            cv = tk.Canvas(box.inner, width=200, height=200, bg=self.C_CARD,
+            box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=5)
+            box.grid(row=i // 4, column=i % 4, padx=3, pady=3)   # 每行 4 个缩略图
+            self._lab(box.inner, title, size=8).pack(padx=2, pady=(2, 0))
+            cv = tk.Canvas(box.inner, width=thumb, height=thumb, bg=self.C_CARD,
                            highlightthickness=0, bd=0)
-            cv.pack(padx=4, pady=(0, 4))
+            cv.pack(padx=3, pady=(0, 3))
             # 滚轮悬停在缩略图上也能滚动对比区
             self._bind_scroll_wheel(box)
             self._bind_scroll_wheel(cv)
@@ -1166,15 +1200,16 @@ class CellSegGUI(tk.Tk):
         # 先完成几何布局（update_idletasks），再绘制图像，确保能取到缩略图画布的真实尺寸
         self.update_idletasks()
         for i, (cv, arr) in enumerate(boxes):
-            self._show(cv, arr, "cmp%d" % i, fallback=200)
+            self._show(cv, arr, "cmp%d" % i, fallback=thumb)
 
     def _on_cmp_configure(self, _e):
         """对比区内容尺寸变化：更新滚动区域范围（缩略图增减时自动调整）"""
         self._update_cmp_region()
 
     def _on_cmp_resize(self, e):
-        """对比区画布宽度变化：内容窗口跟随画布宽度，避免缩略图布局错位"""
-        self.cmp_canvas.itemconfigure(self._cmp_window, width=e.width)
+        """对比区画布宽度变化：内容窗口至少铺满画布；内容更宽时保持自然宽度（配合横向滚动条）"""
+        w = max(e.width, self.cmp_frame.winfo_reqwidth())
+        self.cmp_canvas.itemconfigure(self._cmp_window, width=w)
 
     def _bind_scroll_wheel(self, widget):
         """给对比区部件绑定滚轮，跨平台支持（Windows/macOS 与 Linux）"""
@@ -1191,6 +1226,24 @@ class CellSegGUI(tk.Tk):
         else:
             steps = -3 if getattr(e, "delta", 0) > 0 else 3
         self.cmp_canvas.yview_scroll(steps, "units")
+
+    def _bind_ctrl_wheel(self, widget):
+        """给左侧控制面板及其全部子控件绑定滚轮：悬停任意位置都能滚动面板"""
+        widget.bind("<MouseWheel>", self._on_ctrl_wheel)   # Windows / macOS
+        widget.bind("<Button-4>", self._on_ctrl_wheel)     # Linux 滚轮向上
+        widget.bind("<Button-5>", self._on_ctrl_wheel)     # Linux 滚轮向下
+        for child in widget.winfo_children():
+            self._bind_ctrl_wheel(child)
+
+    def _on_ctrl_wheel(self, e):
+        """滚轮滚动左侧控制面板"""
+        if getattr(e, "num", None) == 4:
+            steps = -3
+        elif getattr(e, "num", None) == 5:
+            steps = 3
+        else:
+            steps = -3 if getattr(e, "delta", 0) > 0 else 3
+        self._ctrl_canvas.yview_scroll(steps, "units")
 
     def edge_compare(self):
         """6 种边缘提取算子结果同屏对比"""

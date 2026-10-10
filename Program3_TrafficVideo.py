@@ -94,6 +94,13 @@ class RCard(tk.Canvas):
         self.inner = tk.Frame(self, bg=fill)
         self._win = self.create_window((pad, pad), window=self.inner, anchor="nw")
         self.bind("<Configure>", self._redraw)
+        # 让画布期望尺寸跟随内部内容（Canvas 默认期望约 396x254，否则 grid 布局会被撑大）
+        self.inner.bind("<Configure>", self._sync_size)
+
+    def _sync_size(self, _e=None):
+        """画布期望尺寸 = 内容框架需求尺寸 + 内边距（供 grid 等按需布位）"""
+        self.config(width=self.inner.winfo_reqwidth() + 2 * self._pad,
+                    height=self.inner.winfo_reqheight() + 2 * self._pad)
 
     def _redraw(self, _e=None):
         """画布尺寸变化：重绘圆角背景并同步内容框架尺寸（window item 始终在上层）"""
@@ -323,8 +330,9 @@ class TrafficGUI(tk.Tk):
         self.f_en, self.f_cn = pick_fonts(self)
 
     def F(self, size, bold=False, eng=False):
-        """界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
-        return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
+        """界面字体：整体缩小一档（×0.86 后取整），避免界面字号偏大"""
+        s = max(7, int(round(size * 0.86)))
+        return (self.f_en if eng else self.f_cn, s, "bold" if bold else "normal")
 
     def _btn(self, parent, text, command, primary=False, width=None, size=10,
              bold=False, height=30, padx=16):
