@@ -452,10 +452,24 @@ class CellSegGUI(tk.Tk):
         self.canvas_res = tk.Canvas(lf2, width=480, height=480, bg="#222")
         self.canvas_res.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
 
-        cmp = tk.LabelFrame(disp, text="多算法结果对比区")
+        cmp = tk.LabelFrame(disp, text="多算法结果对比区（滚轮/滚动条查看全部结果）")
         cmp.pack(fill=tk.BOTH, expand=True, pady=4)
-        self.cmp_frame = tk.Frame(cmp)
-        self.cmp_frame.pack(fill=tk.BOTH, expand=True)
+        # 可滚动容器：缩略图多于一屏时，用右侧滚动条或鼠标滚轮滚动查看
+        cmp_wrap = tk.Frame(cmp)
+        cmp_wrap.pack(fill=tk.BOTH, expand=True)
+        self.cmp_canvas = tk.Canvas(cmp_wrap, highlightthickness=0)
+        self.cmp_scroll = tk.Scrollbar(cmp_wrap, orient=tk.VERTICAL,
+                                       command=self.cmp_canvas.yview)
+        self.cmp_canvas.configure(yscrollcommand=self.cmp_scroll.set)
+        self.cmp_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.cmp_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 缩略图内容框架放入画布窗口，作为滚动区域
+        self.cmp_frame = tk.Frame(self.cmp_canvas)
+        self._cmp_window = self.cmp_canvas.create_window((0, 0), window=self.cmp_frame, anchor="nw")
+        # 内容尺寸变化时更新滚动范围；画布宽度变化时内容窗口跟随
+        self.cmp_frame.bind("<Configure>", self._on_cmp_configure)
+        self.cmp_canvas.bind("<Configure>", self._on_cmp_resize)
+        self._bind_scroll_wheel(self.cmp_canvas)
 
     # ------------------------- 图像读写 -------------------------
 
@@ -799,11 +813,23 @@ class CellSegGUI(tk.Tk):
     # ------------------------- 多算法对比 -------------------------
 
     def _clear_compare(self):
+        """清空对比区：销毁全部缩略图并重建内容框架，滚动位置与滚动区域随之复位"""
         for w in self.cmp_frame.winfo_children():
             w.destroy()
+        # 重建窗口项/框架，避免旧内容把画布窗口项的尺寸钉住导致滚动区域无法收缩
+        self.cmp_canvas.delete(self._cmp_window)
+        self.cmp_frame = tk.Frame(self.cmp_canvas)
+        self._cmp_window = self.cmp_canvas.create_window((0, 0), window=self.cmp_frame, anchor="nw")
+        self.cmp_frame.bind("<Configure>", self._on_cmp_configure)
+        self.cmp_canvas.yview_moveto(0)
+        self.cmp_canvas.configure(scrollregion=(0, 0, 0, 0))
+
+    def _update_cmp_region(self):
+        """按当前内容重新计算对比区滚动范围（内容增减 / 窗口清空后调用）"""
+        self.cmp_canvas.configure(scrollregion=self.cmp_canvas.bbox("all"))
 
     def _show_compare(self, entries):
-        """entries: [(标题, 图像数组)]，以缩略图网格形式显示在对比区"""
+        """entries: [(标题, 图像数组)]，以缩略图网格形式显示在对比区（可滚动查看全部）"""
         self._clear_compare()
         boxes = []
         for i, (title, arr) in enumerate(entries):
@@ -812,11 +838,38 @@ class CellSegGUI(tk.Tk):
             tk.Label(box, text=title, font=("", 9)).pack()
             cv = tk.Canvas(box, width=200, height=200, bg="#333")
             cv.pack()
+            # 滚轮悬停在缩略图上也能滚动对比区
+            self._bind_scroll_wheel(box)
+            self._bind_scroll_wheel(cv)
             boxes.append((cv, arr))
         # 先完成几何布局（update_idletasks），再绘制图像，确保能取到缩略图画布的真实尺寸
         self.update_idletasks()
         for i, (cv, arr) in enumerate(boxes):
             self._show(cv, arr, "cmp%d" % i, fallback=200)
+
+    def _on_cmp_configure(self, _e):
+        """对比区内容尺寸变化：更新滚动区域范围（缩略图增减时自动调整）"""
+        self._update_cmp_region()
+
+    def _on_cmp_resize(self, e):
+        """对比区画布宽度变化：内容窗口跟随画布宽度，避免缩略图布局错位"""
+        self.cmp_canvas.itemconfigure(self._cmp_window, width=e.width)
+
+    def _bind_scroll_wheel(self, widget):
+        """给对比区部件绑定滚轮，跨平台支持（Windows/macOS 与 Linux）"""
+        widget.bind("<MouseWheel>", self._on_cmp_wheel)   # Windows / macOS
+        widget.bind("<Button-4>", self._on_cmp_wheel)     # Linux 滚轮向上
+        widget.bind("<Button-5>", self._on_cmp_wheel)     # Linux 滚轮向下
+
+    def _on_cmp_wheel(self, e):
+        """滚轮滚动对比区内容"""
+        if getattr(e, "num", None) == 4:
+            steps = -3
+        elif getattr(e, "num", None) == 5:
+            steps = 3
+        else:
+            steps = -3 if getattr(e, "delta", 0) > 0 else 3
+        self.cmp_canvas.yview_scroll(steps, "units")
 
     def edge_compare(self):
         """6 种边缘提取算子结果同屏对比"""
