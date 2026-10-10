@@ -610,6 +610,8 @@ class CellSegGUI(tk.Tk):
         self._rot_base = None       # 旋转拖动时的基准图像
         self._rot_base_val = 0.0    # 基准图像对应的滑块角度
         self._edge_base = None      # 边缘算子的共同基准图（切换算子时替换上一个结果）
+        self._last_entries = None   # 最近一次对比区内容（窗口尺寸变化时自动重排）
+        self._cmp_reflow_id = None  # 对比区重排防抖定时器句柄
         self.result_text = tk.StringVar(value="提示：点击【生成示例细胞图】即可无图演示")
 
         self._build_toolbar()
@@ -1224,15 +1226,22 @@ class CellSegGUI(tk.Tk):
         self.cmp_canvas.configure(scrollregion=self.cmp_canvas.bbox("all"))
 
     def _show_compare(self, entries):
-        """entries: [(标题, 图像数组)]，以缩略图网格形式显示在对比区（可滚动查看全部）"""
+        """entries: [(标题, 图像数组)]，以缩略图网格自适应排版显示在对比区（可滚动查看全部）"""
         self._clear_compare()
-        # 缩略图尺寸按对比区实际宽度自适应（每行 4 个），防止右侧超出被裁掉
-        avail = (self.cmp_canvas.winfo_width() or 900) - 96
-        thumb = max(120, min(200, avail // 4))
+        self._last_entries = entries    # 记录内容，窗口尺寸变化时自动重排
+        # 自适应排版：按对比区实际宽度选择列数，缩略图尽量放大（上限 300px）
+        avail = (self.cmp_canvas.winfo_width() or 960)
+        if avail >= 900:
+            cols = 3
+        elif avail >= 520:
+            cols = 2
+        else:
+            cols = 1
+        thumb = max(140, min(300, (avail - cols * 24 - (cols - 1) * 8) // cols))
         boxes = []
         for i, (title, arr) in enumerate(entries):
             box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=5)
-            box.grid(row=i // 4, column=i % 4, padx=3, pady=3)   # 每行 4 个缩略图
+            box.grid(row=i // cols, column=i % cols, padx=4, pady=4)   # 按计算出的列数排布
             self._lab(box.inner, title, size=8).pack(padx=2, pady=(2, 0))
             cv = tk.Canvas(box.inner, width=thumb, height=thumb, bg=self.C_CARD,
                            highlightthickness=0, bd=0)
@@ -1251,9 +1260,20 @@ class CellSegGUI(tk.Tk):
         self._update_cmp_region()
 
     def _on_cmp_resize(self, e):
-        """对比区画布宽度变化：内容窗口至少铺满画布；内容更宽时保持自然宽度（配合横向滚动条）"""
+        """对比区画布宽度变化：内容窗口至少铺满画布；内容更宽时保持自然宽度（配合横向滚动条）。
+        窗口尺寸稳定后按新宽度自动重排缩略图（防抖）"""
         w = max(e.width, self.cmp_frame.winfo_reqwidth())
         self.cmp_canvas.itemconfigure(self._cmp_window, width=w)
+        if getattr(self, "_last_entries", None):
+            if self._cmp_reflow_id:
+                self.after_cancel(self._cmp_reflow_id)
+            self._cmp_reflow_id = self.after(180, self._reflow_compare)
+
+    def _reflow_compare(self):
+        """按最新宽度重新自适应排版对比区缩略图"""
+        self._cmp_reflow_id = None
+        if getattr(self, "_last_entries", None):
+            self._show_compare(self._last_entries)
 
     def _bind_scroll_wheel(self, widget):
         """给对比区部件绑定滚轮，跨平台支持（Windows/macOS 与 Linux）"""
