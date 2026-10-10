@@ -769,10 +769,15 @@ class CellSegGUI(tk.Tk):
         f4 = self._card(ctrl, "④　图像分割")
         f4.pack(fill=tk.X, pady=(0, 12))
         self._btn(f4.inner, "Otsu 阈值分割", self.do_otsu, width=FULL).pack(padx=10, pady=(8, 4))
+        # 分水岭前景系数：标签换行显示（分水岭/前景系数），滑块左移紧贴标签，
+        # 避免右侧数字倍数被挤出可视区域裁掉
         row = tk.Frame(f4.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=10)
-        self._lab(row, "分水岭前景系数", size=9).pack(side=tk.LEFT)
+        lab = tk.Frame(row, bg=self.C_CARD)
+        lab.pack(side=tk.LEFT, padx=(0, 6))
+        self._lab(lab, "分水岭", size=8).pack(anchor="w")
+        self._lab(lab, "前景系数", size=8).pack(anchor="w")
         self.fgcoef_var = tk.DoubleVar(value=0.35)
-        self._slider(row, self.fgcoef_var, 0.10, 0.60, 0.05, 130).pack(side=tk.LEFT, padx=6)
+        self._slider(row, self.fgcoef_var, 0.10, 0.60, 0.05, 130).pack(side=tk.LEFT)
         self._btn(f4.inner, "自适应分水岭分割", self.do_watershed, width=FULL).pack(padx=10, pady=4)
         self._btn(f4.inner, "组合式分割（创新）", self.do_combined, width=FULL).pack(padx=10, pady=4)
         self._btn(f4.inner, "分割方法结果对比", self.seg_compare, width=FULL).pack(padx=10, pady=(4, 10))
