@@ -110,6 +110,7 @@ def wavelet_denoise(x, level=3, thr_mult=0.8, wavelet="db4"):
     噪声标准差由最高频细节系数中位数估计（σ = MAD/0.6745），
     阈值采用通用阈值 thr = k·σ·√(2lnN) 并乘可调系数 k，逐层软阈值处理。
     """
+    # 分解层数不能超过信号长度允许的最大层数，否则 wavedec 会报错
     level = int(min(level, pywt.dwt_max_level(len(x), pywt.Wavelet(wavelet))))
     coeffs = pywt.wavedec(x, wavelet, level=level)
     sigma = np.median(np.abs(coeffs[-1])) / 0.6745
@@ -299,12 +300,14 @@ class SpeechGUI(tk.Tk):
             return
         self._rec_cancel = False
         self.status_var.set("采集中……（点击【停止采集】结束）")
+        # 后台线程录音，避免阻塞 GUI 主线程
         threading.Thread(target=self._record_worker, args=(fs, dur), daemon=True).start()
 
     def _record_worker(self, fs, dur):
+        """录音线程：录完后必须经 after() 回到主线程更新界面（Tk 非线程安全）"""
         try:
             rec = sd.rec(int(dur * fs), samplerate=fs, channels=1, dtype="float32")
-            sd.wait()
+            sd.wait()                       # 阻塞直到录满指定时长
             if self._rec_cancel:
                 return
             self.after(0, lambda: self._apply_recorded(rec[:, 0], fs))
@@ -372,7 +375,7 @@ class SpeechGUI(tk.Tk):
              + 0.15 * np.sin(2 * np.pi * 1320 * t)
              + 0.10 * np.sign(np.sin(2 * np.pi * 220 * t))
              + 0.02 * np.random.randn(len(t)))
-        self.original = s / np.abs(s).max() * 0.8
+        self.original = s / np.abs(s).max() * 0.8   # 归一化到峰值 0.8，留出响度余量
         self.fs = fs
         self.noisy = self.denoised = None
         self.status_var.set("已生成测试音频（440Hz 基频+谐波+方波）@ %d Hz" % fs)
@@ -393,13 +396,13 @@ class SpeechGUI(tk.Tk):
             messagebox.showerror("缺少依赖", "未安装 sounddevice，无法播放")
             return
         try:
-            speed = max(0.25, min(2.0, speed))
-            if speed >= 1:                       # 快进：抽点播放，时长缩短
+            speed = max(0.25, min(2.0, speed))   # 速度限幅在 0.25~2.0 之间（快进/慢放均有上限）
+            if speed >= 1:                       # 快进：按整数倍抽点播放，时长缩短
                 step = int(round(speed))
                 y = x[::step] if step > 1 else x
-            else:                                # 慢放：插值重采样，时长拉长
+            else:                                # 慢放：插值重采样拉长信号，时长增加
                 y = resample(x, int(len(x) / speed))
-            sd.stop()
+            sd.stop()                            # 先停掉上一段声音，避免与本次播放重叠
             sd.play(y.astype(np.float32), self.fs)
             self.status_var.set("正在播放（%.2fx）…" % speed)
         except Exception as e:
@@ -447,6 +450,7 @@ class SpeechGUI(tk.Tk):
                 self.denoised = wiener_denoise(x, self.win_var.get())
                 name = "维纳滤波（窗长 %d）" % self.win_var.get()
             elif t == 1:
+                # 滑块显示的是对数刻度 lgQ/lgR，这里换算回线性方差值
                 q = 10 ** self.kfq_var.get()
                 r = 10 ** self.kfr_var.get()
                 self.denoised = kalman_denoise(x, q, r)
@@ -478,6 +482,7 @@ class SpeechGUI(tk.Tk):
             self.canvas.draw_idle()
             return
         t = np.arange(len(self.original)) / self.fs
+        # 2x2 子图布局：上行 = 原始/加噪波形，下行 = 去噪波形/FFT 频谱对比
         ax1, ax2 = self.axes[0]
         ax3, ax4 = self.axes[1]
 

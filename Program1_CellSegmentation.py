@@ -211,17 +211,18 @@ def otsu_threshold(img):
     """
     g = to_gray(img)
     hist = np.bincount(g.ravel(), minlength=256).astype(np.float64)
-    p = hist / hist.sum()
+    p = hist / hist.sum()                   # 各级灰度出现概率
     omega = np.cumsum(p)                    # 前景累积概率
-    mu = np.cumsum(p * np.arange(256))      # 累积灰度均值
+    mu = np.cumsum(p * np.arange(256))      # 累积灰度期望
     mu_t = mu[-1]                           # 全局灰度均值
     sigma_b = np.zeros(256)
     for t in range(1, 256):
-        w0 = omega[t]
+        w0 = omega[t]                       # 前景占比
         if w0 == 0.0 or w0 == 1.0:
-            continue
-        m0 = mu[t] / w0
-        m1 = (mu_t - mu[t]) / (1.0 - w0)
+            continue                        # 前后景为空时类间方差无意义
+        m0 = mu[t] / w0                     # 前景均值
+        m1 = (mu_t - mu[t]) / (1.0 - w0)    # 背景均值（1-w0 为背景占比）
+        # 类间方差 σ_B² = w0·w1·(m0-m1)²，取最大值对应的灰度即为最佳阈值
         sigma_b[t] = w0 * (1.0 - w0) * (m0 - m1) ** 2
     T = int(np.argmax(sigma_b))
     binary = (g > T) * 255
@@ -487,12 +488,13 @@ class CellSegGUI(tk.Tk):
             return
         a = Image.fromarray(self.original)
         b = Image.fromarray(self.current)
+        # 两图高度可能不同：分别粘贴到等高白底画布并垂直居中，便于并排拼接
         th = max(a.height, b.height)
         ca = Image.new("RGB", (a.width, th), "white")
         ca.paste(a, (0, (th - a.height) // 2))
         cb = Image.new("RGB", (b.width, th), "white")
         cb.paste(b, (0, (th - b.height) // 2))
-        gap = Image.new("RGB", (12, th), (255, 0, 0))
+        gap = Image.new("RGB", (12, th), (255, 0, 0))   # 红色分隔线
         out = Image.fromarray(np.hstack([np.array(ca), np.array(gap), np.array(cb)]))
         out.save(path)
         self.result_text.set("已保存处理前后对比图到: " + path)
@@ -518,13 +520,15 @@ class CellSegGUI(tk.Tk):
         cw = canvas.winfo_width() or fallback
         ch = canvas.winfo_height() or fallback
         pil = Image.fromarray(np.asarray(arr))
+        # 取宽高两个方向的小比例，保证整图放入画布且不变形
         r = min(cw / pil.width, ch / pil.height, 1.0)
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
         photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS))
         canvas.delete("all")
-        canvas.create_image(cw // 2, ch // 2, image=photo)
+        canvas.create_image(cw // 2, ch // 2, image=photo)   # 画布居中
         canvas.photo = photo          # 保持引用防止被回收
+        # 记录缩放比例、居中偏移量与原图尺寸，供裁剪时做画布坐标→图像坐标换算
         self.disp_info[tag] = (r, (cw - w) // 2, (ch - h) // 2, pil.width, pil.height)
 
     # ------------------------- 各类操作 -------------------------
@@ -555,14 +559,15 @@ class CellSegGUI(tk.Tk):
                       "旋转 %.0f°" % self.rot_var.get())
 
     def _on_wl(self, *_):
-        """窗宽窗位滑块回调：实时预览"""
+        """窗宽窗位滑块回调：拖动滑块时把映射结果实时绘制到右侧画布，实现动态预览"""
         if self.current is None:
             return
         try:
+            # 只做预览绘制，不修改 self.current，避免与其它处理操作相互干扰
             out = window_level(self.current, self.wc_var.get(), self.ww_var.get())
             self._show(self.canvas_res, out, "res")
         except Exception:
-            pass
+            pass        # 预览失败不影响主流程
 
     def do_otsu(self):
         if self.current is None:
@@ -614,7 +619,7 @@ class CellSegGUI(tk.Tk):
         self._clear_compare()
         for i, (title, arr) in enumerate(entries):
             box = tk.Frame(self.cmp_frame, bd=1, relief=tk.SUNKEN)
-            box.grid(row=i // 4, column=i % 4, padx=4, pady=4)
+            box.grid(row=i // 4, column=i % 4, padx=4, pady=4)   # 每行 4 个缩略图
             tk.Label(box, text=title, font=("", 9)).pack()
             cv = tk.Canvas(box, width=200, height=200, bg="#333")
             cv.pack()
@@ -673,7 +678,7 @@ class CellSegGUI(tk.Tk):
         self.canvas_orig.config(cursor="crosshair" if self.crop_mode else "")
 
     def _cv2img(self, x, y, tag):
-        """画布坐标 → 图像坐标"""
+        """画布坐标 → 图像坐标：先减去居中偏移量，再除以缩放比例（逆映射），并夹取到图像范围内"""
         r, ox, oy, iw, ih = self.disp_info.get(tag, (1, 0, 0, 1, 1))
         return int(np.clip((x - ox) / r, 0, iw - 1)), int(np.clip((y - oy) / r, 0, ih - 1))
 
@@ -695,6 +700,7 @@ class CellSegGUI(tk.Tk):
     def _crop_release(self, e):
         if not (self.crop_mode and self.crop_start):
             return
+        # 把框选矩形在画布上的两端点换算成图像坐标，并规范为左上/右下角
         x0, y0 = self.crop_start
         ix0, iy0 = self._cv2img(x0, y0, "orig")
         ix1, iy1 = self._cv2img(e.x, e.y, "orig")
@@ -706,9 +712,10 @@ class CellSegGUI(tk.Tk):
         if self.crop_rect:
             self.canvas_orig.delete(self.crop_rect)
             self.crop_rect = None
-        if x1 - x0 < 5 or y1 - y0 < 5:
+        if x1 - x0 < 5 or y1 - y0 < 5:      # 误点击形成的过小区域，不裁剪
             self.result_text.set("框选区域过小，裁剪取消")
             return
+        # 直接对原始图像做区域切片（数组行/列区间取子块）
         self.current = self.original[y0:y1 + 1, x0:x1 + 1].copy()
         self.result_text.set("裁剪完成（%d×%d）" % (self.current.shape[1], self.current.shape[0]))
         self._clear_compare()

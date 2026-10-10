@@ -163,7 +163,7 @@ class TrafficGUI(tk.Tk):
             return
         ret, frame = self.cap.read()
         if not ret:
-            # 播放到结尾：循环或停止
+            # 已播到结尾：循环则回到第一帧继续读，否则停止播放
             if self.loop_var.get():
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = self.cap.read()
@@ -173,7 +173,7 @@ class TrafficGUI(tk.Tk):
                 self.status_var.set("播放结束")
                 return
         if not ret:
-            return
+            return      # 循环读取仍失败（损坏帧等），本帧直接跳过
         self._show_frame(frame)
         # 播放速度越快，帧间隔越短（快进）；越慢，帧间隔越长（慢放）
         delay = max(1, int(round(1000.0 / max(self.fps, 1.0) / self.speed_var.get())))
@@ -184,11 +184,11 @@ class TrafficGUI(tk.Tk):
 
     def _show_frame(self, bgr):
         """把 OpenCV 帧 (BGR) 转 PIL 图像并等比例居中显示到画布"""
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)   # OpenCV 的 BGR 序转 PIL 用的 RGB 序
         pil = Image.fromarray(rgb)
         cw = self.canvas.winfo_width() or 900
         ch = self.canvas.winfo_height() or 460
-        r = min(cw / pil.width, ch / pil.height)
+        r = min(cw / pil.width, ch / pil.height)     # 等比缩放比例，画面不变形
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
         photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS))
