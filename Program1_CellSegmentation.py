@@ -7,8 +7,9 @@
  依赖安装：pip install numpy scipy opencv-python pillow
 ----------------------------------------------------------------------------
  功能清单（对照课程设计要求）：
-  [1] 基础操作  ：灰度化、缩放、旋转、裁剪、窗宽窗位调节（滑块动态预览）
-  [2] 图像增强  ：标准中值滤波、自适应中值滤波、高斯滤波去噪（3 种）
+  [1] 基础操作  ：灰度化、缩放、旋转、裁剪、窗宽窗位调节（滑块动态预览，保持彩色）
+  [2] 图像增强  ：标准中值、自适应中值、高斯滤波、双边滤波（4 种去噪）
+                 + 高斯/椒盐加噪演示（噪声强度滑块调节）
   [3] 边缘提取  ：Sobel、Prewitt、Roberts、Laplacian、LoG、Canny（6 种）
   [4] 图像分割  ：Otsu 阈值分割、自适应分水岭分割（2 种）
                  + 创新方法：组合式自适应分割（中值+Otsu+分水岭）
@@ -362,8 +363,9 @@ def window_level(img, center, width):
     窗宽窗位调节（医学影像 CT 窗技术）：
     把灰度区间 [center-width/2, center+width/2]（窗）线性拉伸映射到 [0,255]。
     center 为窗位，width 为窗宽。
+    彩色图像按通道分别做同样的窗映射，保持色彩信息（不转灰度）。
     """
-    g = to_gray(img).astype(np.float64)
+    g = img.astype(np.float64)
     low = center - width / 2.0
     high = center + width / 2.0
     out = (g - low) * 255.0 / max(high - low, 1e-6)
@@ -394,30 +396,68 @@ def adaptive_median_filter(img, smax=7):
     B 级判断：Zmin < Zxy < Zmax 成立则输出 Zxy（保留原像素细节），
               否则输出 Zmed（滤除脉冲噪声）。
     该算法在去噪的同时比标准中值滤波更好地保留边缘细节。
+    彩色图像按 R/G/B 三个通道分别滤波，保持色彩信息（不转灰度）。
     """
-    gray = to_gray(img)
-    h, w = gray.shape
-    pad = smax // 2
-    p = np.pad(gray, pad, mode="reflect")
-    out = np.empty_like(gray)
-    sizes = list(range(3, smax + 1, 2))
-    for i in range(h):
-        for j in range(w):
-            zxy = gray[i, j]
-            result = zxy
-            for s in sizes:
-                r = s // 2
-                win = p[i:i + s, j:j + s]
-                zmin = win.min()
-                zmed = np.median(win)
-                zmax = win.max()
-                if zmin < zmed < zmax:                 # A 级通过 → B 级
-                    result = zxy if zmin < zxy < zmax else zmed
-                    break
-                else:                                   # 窗口继续增大
-                    result = zmed
-            out[i, j] = result
-    return out.astype(np.uint8)
+    def _am2d(gray):
+        """单通道自适应中值滤波核心循环"""
+        h, w = gray.shape
+        pad = smax // 2
+        p = np.pad(gray, pad, mode="reflect")
+        out = np.empty_like(gray)
+        sizes = list(range(3, smax + 1, 2))
+        for i in range(h):
+            for j in range(w):
+                zxy = gray[i, j]
+                result = zxy
+                for s in sizes:
+                    r = s // 2
+                    win = p[i:i + s, j:j + s]
+                    zmin = win.min()
+                    zmed = np.median(win)
+                    zmax = win.max()
+                    if zmin < zmed < zmax:                 # A 级通过 → B 级
+                        result = zxy if zmin < zxy < zmax else zmed
+                        break
+                    else:                                   # 窗口继续增大
+                        result = zmed
+                out[i, j] = result
+        return out
+
+    if img.ndim == 3:                       # 彩色：逐通道滤波后合并，保留颜色
+        return np.stack([_am2d(img[..., c]) for c in range(3)],
+                        axis=2).astype(np.uint8)
+    return _am2d(img).astype(np.uint8)
+
+
+def bilateral_denoise(img, sigma=8.0):
+    """
+    双边滤波去噪（增强方法 4）：
+    权重 = 空间近距离高斯 × 灰度相似度高斯，平坦区平滑去噪、
+    边缘处灰度差大而权重小，因此去噪同时保持边缘，适合细胞核边界。
+    """
+    if not HAS_CV2:
+        raise RuntimeError("双边滤波依赖 OpenCV，请安装：pip install opencv-python")
+    return cv2.bilateralFilter(np.asarray(img, dtype=np.uint8), 5, sigma, sigma)
+
+
+def add_gaussian_noise(img, sigma=20.0):
+    """叠加高斯噪声：均值为 0、标准差 sigma 的正态噪声，强度由滑块控制（加噪演示）"""
+    noise = np.random.default_rng().normal(0, sigma, img.shape)
+    return np.clip(img.astype(np.float64) + noise, 0, 255).astype(np.uint8)
+
+
+def add_salt_pepper(img, p=0.02):
+    """叠加椒盐（脉冲）噪声：随机 p 比例的像素置为纯白(255)或纯黑(0)（加噪演示）"""
+    rng = np.random.default_rng()
+    mask = rng.random(img.shape[:2]) < p            # 随机选中的像素位置
+    ys, xs = np.where(mask)
+    vals = np.where(rng.random(ys.size) < 0.5, 255, 0).astype(np.uint8)  # 椒 / 盐各半
+    out = np.asarray(img).copy()
+    if out.ndim == 3:
+        out[ys, xs] = vals[:, None]
+    else:
+        out[ys, xs] = vals
+    return out
 
 
 # --------------------------- 边缘提取（6 种） ---------------------------
@@ -828,7 +868,29 @@ class CellSegGUI(tk.Tk):
         self._slider(row, self.sigma_var, 0.5, 5.0, 0.1, 130).pack(side=tk.LEFT, padx=6)
         self._btn(f2.inner, "高斯滤波去噪",
                   lambda: self.apply_op(lambda im: gaussian_denoise(im, self.sigma_var.get()),
-                                        "高斯滤波去噪"), width=FULL).pack(padx=10, pady=(4, 10))
+                                        "高斯滤波去噪"), width=FULL).pack(padx=10, pady=4)
+        # 增强方法 4：双边滤波（去噪同时保边）
+        row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=10)
+        self._lab(row, "双边σ", size=9).pack(side=tk.LEFT)
+        self.bi_var = tk.DoubleVar(value=8.0)
+        self._slider(row, self.bi_var, 3.0, 16.0, 1.0, 130).pack(side=tk.LEFT, padx=6)
+        self._btn(f2.inner, "双边滤波去噪",
+                  lambda: self.apply_op(lambda im: bilateral_denoise(im, self.bi_var.get()),
+                                        "双边滤波去噪"), width=FULL).pack(padx=10, pady=4)
+        # 加噪演示：先加噪再点上面的去噪按钮，直观对比去噪效果
+        sep = tk.Frame(f2.inner, bg=self.C_LINE, height=1)
+        sep.pack(fill=tk.X, padx=10, pady=(6, 6))
+        self._lab(f2.inner, "加噪（演示用，加噪后可点上方按钮去噪）", size=9,
+                  fg=self.C_ACCENT).pack(anchor="w", padx=10)
+        nrow = tk.Frame(f2.inner, bg=self.C_CARD); nrow.pack(fill=tk.X, padx=10)
+        self._btn(nrow, "高斯噪声", lambda: self._add_noise("gauss"),
+                  width=(FULL - 8) // 2, size=9).pack(side=tk.LEFT, padx=(0, 4), pady=(4, 0))
+        self._btn(nrow, "椒盐噪声", lambda: self._add_noise("sp"),
+                  width=(FULL - 8) // 2, size=9).pack(side=tk.LEFT, padx=(4, 0), pady=(4, 0))
+        row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=10)
+        self._lab(row, "噪声强度", size=9).pack(side=tk.LEFT)
+        self.noise_var = tk.DoubleVar(value=20.0)
+        self._slider(row, self.noise_var, 1, 60, 1, 130).pack(side=tk.LEFT, padx=6, pady=(0, 10))
 
         # ③ 边缘提取
         f3 = self._card(ctrl, "③　边缘提取（6 种算子）")
@@ -1131,6 +1193,21 @@ class CellSegGUI(tk.Tk):
         self._reset_preview_bases()
         self._clear_compare()
         self.update_display()
+
+    def _add_noise(self, kind):
+        """增强区加噪演示：在显示图像上叠加高斯/椒盐噪声（噪声强度滑块控制）
+        kind: "gauss" 高斯噪声(强度=σ)；"sp" 椒盐噪声(强度=密度=滑块值/1000)"""
+        if self.current is None:
+            messagebox.showwarning("提示", "请先打开图像")
+            return
+        v = self.noise_var.get()
+        if kind == "gauss":
+            func = lambda im: add_gaussian_noise(im, sigma=v)
+            name = "添加高斯噪声(σ=%g)" % v
+        else:
+            func = lambda im: add_salt_pepper(im, p=v / 1000.0)
+            name = "添加椒盐噪声(密度=%.1f%%)" % (v / 10.0)
+        self.apply_op(func, name)
 
     # --------------------- 缩放 / 旋转（滑块实时预览 + 按钮提交） ---------------------
 
