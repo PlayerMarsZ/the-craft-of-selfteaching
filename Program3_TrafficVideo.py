@@ -135,6 +135,9 @@ class RoundBtn(tk.Canvas):
         self.bind("<Leave>", lambda e: self._draw(self._fill))
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<ButtonRelease-1>", self._on_release)
+        # 画布首次布局 / 尺寸变化时按真实尺寸重绘；否则创建时画布尚未映射
+        # （winfo_width=1），文字会画在左上角出现错位，悬停触发重绘才恢复正常
+        self.bind("<Configure>", self._on_configure)
         self._draw(self._fill)
 
     # ---- 绘制 ----
@@ -145,6 +148,11 @@ class RoundBtn(tk.Canvas):
         round_rect(self, 1, 1, w - 2, h - 2, self._rad, fill=fill, outline="")
         self.create_text(w // 2, h // 2, text=self._text,
                          fill=self._fg, font=self._font)
+
+    # ---- 尺寸联动 ----
+    def _on_configure(self, _e=None):
+        """画布尺寸变化（首次布局或窗口缩放）：按当前按压状态用真实尺寸重绘"""
+        self._draw(self._fill_d if self._pressed else self._fill)
 
     # ---- 交互 ----
     def _on_press(self, _e):
@@ -205,6 +213,7 @@ class FlatSlider(tk.Canvas):
         self.bind("<ButtonPress-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_motion)
         self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Configure>", lambda e: self._draw())   # 布局完成后按真实尺寸重绘
         self._draw()
 
     # ---- 数值换算 ----
