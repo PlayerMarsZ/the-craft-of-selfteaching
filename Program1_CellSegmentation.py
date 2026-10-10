@@ -448,8 +448,8 @@ class CellSegGUI(tk.Tk):
         tk.Button(bar2, text="放大", width=5, command=lambda: self._zoom_res(1.25)).pack(side=tk.LEFT, padx=2)
         tk.Button(bar2, text="缩小", width=5, command=lambda: self._zoom_res(0.8)).pack(side=tk.LEFT, padx=2)
         tk.Button(bar2, text="适应", width=5,
-                  command=lambda: (self._reset_res_view(), self._redraw_res())).pack(side=tk.LEFT, padx=2)
-        tk.Label(bar2, text="滚轮=缩放  拖动=平移  双击=复位", fg="#777",
+                  command=lambda: (self._reset_res_view(), self._redraw_all())).pack(side=tk.LEFT, padx=2)
+        tk.Label(bar2, text="左右联动：滚轮=缩放 拖动=平移 双击=复位", fg="#777",
                  font=("", 8)).pack(side=tk.LEFT, padx=6)
         self.canvas_res = tk.Canvas(lf2, width=480, height=480, bg="#222")
         self.canvas_res.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -547,17 +547,20 @@ class CellSegGUI(tk.Tk):
 
     def _show(self, canvas, arr, tag, fallback=480):
         """把 numpy 图像等比例缩放后绘制到指定画布中央；
-        结果区(res)额外支持视图缩放/平移，放大后图像可超出画布边框，被裁部分可拖动查看"""
+        原图区(orig)与结果区(res)共享同一视图（同步缩放/平移），放大后图像可超出画布边框，
+        被裁部分可拖动查看；对比区缩略图(cmp*)始终保持适应窗口显示"""
         cw = canvas.winfo_width() or fallback
         ch = canvas.winfo_height() or fallback
         pil = Image.fromarray(np.asarray(arr))
         # 基础适配比例：保证整图放入画布且不变形
         r0 = min(cw / pil.width, ch / pil.height, 1.0)
-        if tag == "res":
+        shared = tag in ("res", "orig")            # 左右两框共享视图状态
+        if shared:
             v = self.view.setdefault("res", {"zoom": 1.0, "dx": 0, "dy": 0})
-            zoom = max(0.2, min(16.0, v["zoom"]))   # 1=适应窗口；>1 时图像超出画布边框
+            zoom = max(0.2, min(16.0, v["zoom"]))  # 1=适应窗口；>1 时图像超出画布边框
             dx, dy = v["dx"], v["dy"]
-            self._res_view_arr = arr                # 记录最近绘制的图像供缩放/平移重绘
+            if tag == "res":
+                self._res_view_arr = arr           # 记录最近绘制的图像供缩放/平移重绘
         else:
             zoom, dx, dy = 1.0, 0, 0
         r = r0 * zoom
@@ -572,13 +575,12 @@ class CellSegGUI(tk.Tk):
             resample = Image.LANCZOS
         photo = ImageTk.PhotoImage(pil.resize((w, h), resample))
         canvas.delete("all")
-        if tag == "res":
-            # 平移限幅：图像超出画布的部分可自由拖动，否则吸附回居中位置，防止图像拖丢
+        if shared:
+            # 仅按本画布限幅绘制，不回写共享状态（共享状态在缩放/平移处理器中统一限幅）
             max_dx = max(0.0, (w - cw) / 2.0 + 60.0)
             max_dy = max(0.0, (h - ch) / 2.0 + 60.0)
             dx = float(np.clip(dx, -max_dx, max_dx))
             dy = float(np.clip(dy, -max_dy, max_dy))
-            v["dx"], v["dy"] = dx, dy
         canvas.create_image(cw // 2 + dx, ch // 2 + dy, image=photo)   # 中心+平移偏移
         canvas.photo = photo          # 保持引用防止被回收
         # 记录缩放比例、偏移量与原图尺寸，供裁剪时做画布坐标→图像坐标换算
@@ -815,22 +817,24 @@ class CellSegGUI(tk.Tk):
         self._show_compare(entries)
         self.result_text.set("已生成 Otsu / 分水岭 / 组合式分割结果对比")
 
-    # --------------------- 结果区放大预览（滚轮缩放 / 拖动平移 / 双击复位） ---------------------
+    # ---------------- 左右框联动放大预览（滚轮缩放 / 拖动平移 / 双击复位） ----------------
 
     def _bind_res_view(self):
-        """结果画布的缩放/平移事件绑定（原图区仍负责裁剪框选，互不干扰）"""
-        c = self.canvas_res
-        c.bind("<Enter>", lambda e: c.focus_set())       # Windows 上滚轮事件需要画布持有焦点
-        c.bind("<MouseWheel>", self._on_res_wheel)       # Windows / macOS 滚轮
-        c.bind("<Button-4>", self._on_res_wheel)         # Linux 滚轮向上
-        c.bind("<Button-5>", self._on_res_wheel)         # Linux 滚轮向下
-        c.bind("<ButtonPress-1>", self._on_res_press)
-        c.bind("<B1-Motion>", self._on_res_drag)
-        c.bind("<ButtonRelease-1>", self._on_res_release)
-        c.bind("<Double-Button-1>", self._on_res_dblclick)
+        """左右两个画布绑定共享视图事件：
+        滚轮=缩放、左键拖动=平移、双击=复位；两框显示状态始终同步。
+        左框的左键事件在裁剪模式下仍为框选（由 _crop_press 等按模式分流）"""
+        self.canvas_res.bind("<ButtonPress-1>", self._on_view_press)
+        self.canvas_res.bind("<B1-Motion>", self._on_view_drag)
+        self.canvas_res.bind("<ButtonRelease-1>", self._on_view_release)
+        for c in (self.canvas_res, self.canvas_orig):
+            c.bind("<Enter>", lambda e: e.widget.focus_set())   # Windows 上滚轮事件需要焦点
+            c.bind("<MouseWheel>", self._on_view_wheel)         # Windows / macOS 滚轮
+            c.bind("<Button-4>", self._on_view_wheel)           # Linux 滚轮向上
+            c.bind("<Button-5>", self._on_view_wheel)           # Linux 滚轮向下
+            c.bind("<Double-Button-1>", self._on_view_dblclick)
 
-    def _on_res_wheel(self, e):
-        """滚轮缩放：向上放大、向下缩小（以光标所在位置为缩放锚点）"""
+    def _on_view_wheel(self, e):
+        """滚轮缩放（左右框通用）：向上放大、向下缩小，以光标位置为缩放锚点"""
         if getattr(e, "num", None) == 4:
             factor = 1.2
         elif getattr(e, "num", None) == 5:
@@ -840,7 +844,7 @@ class CellSegGUI(tk.Tk):
         self._zoom_res(factor, e.x, e.y)
 
     def _zoom_res(self, factor, mx=None, my=None):
-        """按 factor 调整结果区显示倍率；mx/my 为锚点（缺省画布中心），缩放后锚点处图像保持不动"""
+        """按 factor 调整共享视图倍率；mx/my 为锚点（缺省画布中心），缩放后锚点处图像保持不动"""
         arr = self._res_view_arr
         if arr is None:
             return
@@ -857,41 +861,61 @@ class CellSegGUI(tk.Tk):
         v["zoom"] = z_new
         v["dx"] = (mx - cw / 2.0) - ((mx - cw / 2.0) - v["dx"]) / z_old * z_new
         v["dy"] = (my - ch / 2.0) - ((my - ch / 2.0) - v["dy"]) / z_old * z_new
-        self._show(self.canvas_res, arr, "res")
+        self._clamp_view()
+        self._redraw_all()
+
+    def _clamp_view(self):
+        """按结果区图像显示尺寸限幅共享平移量，防止把图像拖出视野"""
+        v = self.view["res"]
+        if self._res_view_arr is None:
+            return
+        cw = self.canvas_res.winfo_width() or 480
+        ch = self.canvas_res.winfo_height() or 480
+        h_img, w_img = self._res_view_arr.shape[:2]
+        r0 = min(cw / w_img, ch / h_img, 1.0)
+        zoom = v["zoom"]
+        max_dx = max(0.0, (w_img * r0 * zoom - cw) / 2.0 + 60.0)
+        max_dy = max(0.0, (h_img * r0 * zoom - ch) / 2.0 + 60.0)
+        v["dx"] = float(np.clip(v["dx"], -max_dx, max_dx))
+        v["dy"] = float(np.clip(v["dy"], -max_dy, max_dy))
 
     def _reset_res_view(self):
-        """复位结果区视图：回到适应窗口、居中显示"""
+        """复位共享视图：左右两框都回到适应窗口、居中显示"""
         self.view["res"] = {"zoom": 1.0, "dx": 0, "dy": 0}
 
-    def _redraw_res(self):
-        """按当前视图状态重绘结果区最近一次绘制的图像"""
+    def _redraw_all(self):
+        """按共享视图同时重绘左右两框（左框与右框的缩放/平移保持同步）"""
         if self._res_view_arr is not None:
             self._show(self.canvas_res, self._res_view_arr, "res")
+        if self.original is not None:
+            self._show(self.canvas_orig, self.original, "orig")
 
-    def _on_res_press(self, e):
-        """按下左键：进入拖动平移状态，记录起点并切换光标样式"""
+    def _on_view_press(self, e):
+        """按下左键：进入拖动平移状态，记录起点并切换光标"""
         self._res_drag = (e.x, e.y)
-        self.canvas_res.config(cursor="fleur")
+        e.widget.config(cursor="fleur")
 
-    def _on_res_drag(self, e):
-        """拖动平移：把放大后超出画布边框的图像部分拖入视野"""
+    def _on_view_drag(self, e):
+        """拖动平移：把放大后超出画布边框的部分拖入视野，左右两框同步移动"""
         if self._res_drag is None or self._res_view_arr is None:
             return
         v = self.view["res"]
         v["dx"] += e.x - self._res_drag[0]
         v["dy"] += e.y - self._res_drag[1]
         self._res_drag = (e.x, e.y)
-        self._show(self.canvas_res, self._res_view_arr, "res")
+        self._clamp_view()
+        self._redraw_all()
 
-    def _on_res_release(self, _e):
+    def _on_view_release(self, _e):
         """松开左键：结束平移"""
         self._res_drag = None
         self.canvas_res.config(cursor="")
+        self.canvas_orig.config(cursor="")
 
-    def _on_res_dblclick(self, _e):
-        """双击：视图复位到适应窗口"""
+    def _on_view_dblclick(self, _e):
+        """双击：共享视图复位到适应窗口"""
         self._reset_res_view()
-        self._redraw_res()
+        self._redraw_all()
 
     # ------------------------- 裁剪交互 -------------------------
 
@@ -917,12 +941,16 @@ class CellSegGUI(tk.Tk):
 
     def _crop_press(self, e):
         if not self.crop_mode:
+            self._on_view_press(e)     # 非裁剪模式：在左框按下左键 = 左右联动平移
             return
         self.crop_start = (e.x, e.y)
         self.crop_rect = None
 
     def _crop_drag(self, e):
-        if not (self.crop_mode and self.crop_start):
+        if not self.crop_mode:
+            self._on_view_drag(e)      # 非裁剪模式：左框拖动 = 左右联动平移
+            return
+        if not self.crop_start:
             return
         c = self.canvas_orig
         if self.crop_rect:
@@ -931,7 +959,10 @@ class CellSegGUI(tk.Tk):
         self.crop_rect = c.create_rectangle(x0, y0, e.x, e.y, outline="#f33", width=2)
 
     def _crop_release(self, e):
-        if not (self.crop_mode and self.crop_start):
+        if not self.crop_mode:
+            self._on_view_release(e)   # 非裁剪模式：结束平移
+            return
+        if not self.crop_start:
             return
         # 把框选矩形在画布上的两端点换算成图像坐标，并规范为左上/右下角
         x0, y0 = self.crop_start
