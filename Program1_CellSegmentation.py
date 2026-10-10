@@ -1229,15 +1229,16 @@ class CellSegGUI(tk.Tk):
         """entries: [(标题, 图像数组)]，以缩略图网格自适应排版显示在对比区（可滚动查看全部）"""
         self._clear_compare()
         self._last_entries = entries    # 记录内容，窗口尺寸变化时自动重排
-        # 自适应排版：按对比区实际宽度选择列数，缩略图尽量放大（上限 300px）
-        avail = (self.cmp_canvas.winfo_width() or 960)
-        if avail >= 900:
-            cols = 3
-        elif avail >= 520:
-            cols = 2
-        else:
-            cols = 1
-        thumb = max(140, min(300, (avail - cols * 24 - (cols - 1) * 8) // cols))
+        # 自适应排版：在 1~4 列中选择“图片最大且几乎填满宽度”的布局（缩略图 150~420px）
+        avail = (self.cmp_canvas.winfo_width() or 900)
+        cols, thumb = 1, 150
+        for c in (1, 2, 3, 4):
+            cost = 24 * c + 8 * (c - 1) + 8   # 卡片内外边距 + 网格间距 + 边框
+            t = (avail - cost) // c
+            if 150 <= t <= 420:
+                cols, thumb = c, t
+                break
+        thumb = min(max(120, thumb), max(120, avail - 30))   # 兜底：至少留出 30px 边距
         boxes = []
         for i, (title, arr) in enumerate(entries):
             box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=5)
