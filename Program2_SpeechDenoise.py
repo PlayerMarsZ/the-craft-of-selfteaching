@@ -23,6 +23,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter import font as tkfont
 
+# 共享 macOS 主题组件（圆角卡片 / 圆角按钮 / 扁平滑块 / 高DPI适配）
+from ui_theme import enable_hidpi, pick_fonts, RCard, RoundBtn, FlatSlider
+
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import wiener, resample
@@ -168,12 +171,16 @@ class SpeechGUI(tk.Tk):
     GLASS    = "#FAFAFC"
 
     def __init__(self):
+        enable_hidpi()          # 高 DPI 适配（必须在创建根窗口之前）
         super().__init__()
         self.title("语音采集及降噪系统")
-        self.geometry("1460x860")
+        self.geometry("1500x880")
         self.minsize(1200, 700)
+        # 按屏幕实际 DPI 设置 Tk 缩放，避免高分辨率屏界面发虚
+        self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
         self.configure(bg=self.C_BG)
         self._setup_fonts()
+        self._btn_full = 400    # 左侧面板卡片内通栏按钮宽度（像素）
 
         self.fs = 16000            # 当前采样率
         self.original = None       # 原始语音 float64 数组
@@ -189,33 +196,17 @@ class SpeechGUI(tk.Tk):
 
     def _setup_fonts(self):
         """英文优先 Inter-Medium，中文优先苹方中等（PingFang SC Medium），未安装时逐级回退"""
-        avail = set(tkfont.families(self))
-
-        def pick(candidates, fallback):
-            for c in candidates:
-                if c in avail:
-                    return c
-            return fallback
-
-        self.f_en = pick(["Inter-Medium", "Inter Medium", "Inter",
-                          "SF Pro Text", "Helvetica Neue", "Segoe UI"], "Arial")
-        self.f_cn = pick(["PingFang SC Medium", "PingFangSC-Medium", "PingFang SC",
-                          "Microsoft YaHei UI", "Microsoft YaHei",
-                          "Noto Sans CJK SC", "WenQuanYi Micro Hei"], "SimHei")
+        self.f_en, self.f_cn = pick_fonts(self)
 
     def F(self, size, bold=False, eng=False):
         """界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
         return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
 
-    def _btn(self, parent, text, command, primary=False, width=None, size=10, bold=False):
-        """macOS 风格扁平按钮：primary=True 蓝底白字，否则浅灰底深字"""
-        bg = self.C_ACCENT if primary else self.C_BTN
-        ab = self.C_ACC_D if primary else self.C_BTN_D
-        fg = "#FFFFFF" if primary else self.C_TEXT
-        return tk.Button(parent, text=text, command=command, width=width,
-                         relief=tk.FLAT, bd=0, highlightthickness=0,
-                         bg=bg, fg=fg, activebackground=ab, activeforeground=fg,
-                         font=self.F(size, bold), padx=10, pady=3, cursor="hand2")
+    def _btn(self, parent, text, command, primary=False, width=None, size=10,
+             bold=False, height=30, padx=16):
+        """macOS 风格圆角扁平按钮：width 为像素（None=按文字自适应）"""
+        return RoundBtn(parent, text=text, command=command, primary=primary,
+                        font=self.F(size, bold), width=width, height=height, padx=padx)
 
     def _lab(self, parent, text, size=10, fg=None, bold=False):
         """文字标签：自动继承父面板底色"""
@@ -223,12 +214,9 @@ class SpeechGUI(tk.Tk):
                         font=self.F(size, bold))
 
     def _slider(self, parent, var, frm, to, res=1.0, length=170, command=None, size=9):
-        """macOS 风格滑块：细滑杆、蓝色激活态、无边框"""
-        return tk.Scale(parent, from_=frm, to=to, resolution=res, orient=tk.HORIZONTAL,
-                        variable=var, length=length, command=command,
-                        bg=self.C_CARD, fg=self.C_TEXT, troughcolor=self.C_LINE,
-                        activebackground=self.C_ACCENT, highlightthickness=0, bd=0,
-                        font=self.F(size), sliderlength=14, highlightbackground=self.C_CARD)
+        """macOS 风格扁平圆角滑块：细轨道 + 白色圆滑钮 + 右侧数值"""
+        return FlatSlider(parent, variable=var, from_=frm, to=to, resolution=res,
+                          length=length, command=command, font=self.F(size, eng=True))
 
     def _radio(self, parent, text, var, value, size=10):
         """白底单选按钮（卡片内使用）"""
@@ -238,12 +226,11 @@ class SpeechGUI(tk.Tk):
                               highlightthickness=0, bd=0, font=self.F(size))
 
     def _card(self, parent, title=None):
-        """白色卡片面板（细描边、粗体标题）"""
-        card = tk.Frame(parent, bg=self.C_CARD, bd=0,
-                        highlightthickness=1, highlightbackground=self.C_LINE)
+        """白色圆角卡片面板（内容放到 card.inner 中）"""
+        card = RCard(parent, fill=self.C_CARD, outline=self.C_LINE, radius=20, pad=12)
         if title:
-            tk.Label(card, text=title, bg=self.C_CARD, fg=self.C_TEXT,
-                     font=self.F(11, True, eng=True)).pack(anchor="w", padx=12, pady=(8, 2))
+            tk.Label(card.inner, text=title, bg=self.C_CARD, fg=self.C_TEXT,
+                     font=self.F(11, True)).pack(anchor="w", padx=10, pady=(6, 2))
         return card
 
     # ------------------------- 界面搭建 -------------------------
@@ -260,7 +247,7 @@ class SpeechGUI(tk.Tk):
         # ① 语音采集 / 文件读写
         f1 = self._card(ctrl, "①　语音采集 / 读写")
         f1.pack(fill=tk.X, pady=(0, 10))
-        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 2))
+        row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 2))
         self._lab(row, "采样率", size=9).pack(side=tk.LEFT)
         self.fs_combo = ttk.Combobox(row, values=["8000", "16000", "44100"],
                                      width=8, state="readonly",
@@ -270,67 +257,66 @@ class SpeechGUI(tk.Tk):
         self._lab(row, "时长(s)", size=9).pack(side=tk.LEFT)
         self.dur_var = tk.StringVar(value="3")
         tk.Entry(row, textvariable=self.dur_var, width=6, relief=tk.FLAT, bd=0,
-                 highlightthickness=1, highlightbackground=self.C_LINE,
-                 highlightcolor=self.C_ACCENT, bg=self.C_CARD, fg=self.C_TEXT,
+                 highlightthickness=0, bg="#EEEEF2", fg=self.C_TEXT,
                  font=self.F(10, eng=True), insertbackground=self.C_TEXT
                  ).pack(side=tk.LEFT, padx=8, ipady=2)
 
-        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=2)
-        self._btn(row, "开始采集", self.start_record, primary=True, width=10).pack(side=tk.LEFT, padx=(0, 6))
-        self._btn(row, "停止采集", self.stop_record, width=10).pack(side=tk.LEFT, padx=6)
-        row = tk.Frame(f1, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(2, 8))
-        self._btn(row, "打开音频文件", self.open_audio, width=10).pack(side=tk.LEFT, padx=(0, 6))
-        self._btn(row, "保存当前信号WAV", self.save_signal, width=14).pack(side=tk.LEFT, padx=6)
-        self._btn(row, "生成测试音频", self.gen_test, width=10).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=2)
+        self._btn(row, "开始采集", self.start_record, primary=True).pack(side=tk.LEFT, padx=(0, 6))
+        self._btn(row, "停止采集", self.stop_record).pack(side=tk.LEFT, padx=6)
+        row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(2, 8))
+        self._btn(row, "打开音频文件", self.open_audio).pack(side=tk.LEFT, padx=(0, 6))
+        self._btn(row, "保存当前信号WAV", self.save_signal).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "生成测试音频", self.gen_test).pack(side=tk.LEFT, padx=6)
 
         # ② 语音播放
         f2 = self._card(ctrl, "②　语音播放")
-        f2.pack(fill=tk.X, pady=(0, 10))
-        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        f2.pack(fill=tk.X, pady=(0, 12))
+        row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._lab(row, "播放源", size=9).pack(side=tk.LEFT)
         self.play_src = tk.IntVar(value=0)
         self._radio(row, "原始", self.play_src, 0).pack(side=tk.LEFT, padx=6)
         self._radio(row, "加噪", self.play_src, 1).pack(side=tk.LEFT, padx=6)
         self._radio(row, "去噪", self.play_src, 2).pack(side=tk.LEFT, padx=6)
 
-        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._lab(row, "速度", size=9).pack(side=tk.LEFT)
         self.speed_var = tk.DoubleVar(value=1.0)
         self._slider(row, self.speed_var, 0.25, 2.0, 0.05, 190).pack(side=tk.LEFT, padx=8)
 
-        row = tk.Frame(f2, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(0, 8))
-        self._btn(row, "播放", lambda: self._play(self.speed_var.get()), primary=True, width=8
+        row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(0, 8))
+        self._btn(row, "播放", lambda: self._play(self.speed_var.get()), primary=True
                   ).pack(side=tk.LEFT, padx=(0, 6))
-        self._btn(row, "停止", self.stop_play, width=8).pack(side=tk.LEFT, padx=6)
-        self._btn(row, "快进×2", self.play_fast, width=8).pack(side=tk.LEFT, padx=6)
-        self._btn(row, "慢放×0.5", self.play_slow, width=9).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "停止", self.stop_play).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "快进×2", self.play_fast).pack(side=tk.LEFT, padx=6)
+        self._btn(row, "慢放×0.5", self.play_slow).pack(side=tk.LEFT, padx=6)
 
         # ③ 加噪
         f3 = self._card(ctrl, "③　加噪（2 种噪声）")
-        f3.pack(fill=tk.X, pady=(0, 10))
+        f3.pack(fill=tk.X, pady=(0, 12))
         self.noise_type = tk.IntVar(value=0)
-        row = tk.Frame(f3, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._radio(row, "高斯白噪声", self.noise_type, 0).pack(side=tk.LEFT)
         self._lab(row, "SNR(dB)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.snr_var = tk.DoubleVar(value=10.0)
         self._slider(row, self.snr_var, -10, 60, 1, 150).pack(side=tk.LEFT, padx=6)
-        row = tk.Frame(f3, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._radio(row, "脉冲噪声", self.noise_type, 1).pack(side=tk.LEFT)
         self._lab(row, "密度(%)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.dens_var = tk.DoubleVar(value=5.0)
         self._slider(row, self.dens_var, 0, 50, 0.5, 150).pack(side=tk.LEFT, padx=6)
-        self._btn(f3, "执行加噪", self.do_add_noise).pack(fill=tk.X, padx=11, pady=(2, 8))
+        self._btn(f3.inner, "执行加噪", self.do_add_noise, width=self._btn_full).pack(padx=11, pady=(4, 8))
 
         # ④ 去噪
         f4 = self._card(ctrl, "④　去噪（3 种算法）")
-        f4.pack(fill=tk.X, pady=(0, 10))
+        f4.pack(fill=tk.X, pady=(0, 12))
         self.denoise_type = tk.IntVar(value=0)
-        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
+        row = tk.Frame(f4.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._radio(row, "维纳", self.denoise_type, 0).pack(side=tk.LEFT)
         self._lab(row, "窗长", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.win_var = tk.IntVar(value=9)
         self._slider(row, self.win_var, 3, 101, 2, 130).pack(side=tk.LEFT, padx=6)
-        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        row = tk.Frame(f4.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._radio(row, "卡尔曼", self.denoise_type, 1).pack(side=tk.LEFT)
         self._lab(row, "lgQ", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.kfq_var = tk.DoubleVar(value=-2.0)
@@ -338,7 +324,7 @@ class SpeechGUI(tk.Tk):
         self._lab(row, "lgR", size=9).pack(side=tk.LEFT, padx=(8, 0))
         self.kfr_var = tk.DoubleVar(value=-2.0)
         self._slider(row, self.kfr_var, -3.0, 0.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
-        row = tk.Frame(f4, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
+        row = tk.Frame(f4.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._radio(row, "小波", self.denoise_type, 2).pack(side=tk.LEFT)
         self._lab(row, "层数", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.wl_lvl_var = tk.IntVar(value=3)
@@ -346,26 +332,28 @@ class SpeechGUI(tk.Tk):
         self._lab(row, "阈值系数", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.wl_thr_var = tk.DoubleVar(value=0.5)
         self._slider(row, self.wl_thr_var, 0.1, 2.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
-        self._btn(f4, "执行去噪", self.do_denoise).pack(fill=tk.X, padx=11, pady=(4, 8))
+        self._btn(f4.inner, "执行去噪", self.do_denoise, width=self._btn_full).pack(padx=11, pady=(6, 8))
 
         # ⑤ 效果分析
         f5 = self._card(ctrl, "⑤　去噪效果分析（SNR / MSE）")
-        f5.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(f5, textvariable=self.metric_var, justify=tk.LEFT, anchor="w",
+        f5.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(f5.inner, textvariable=self.metric_var, justify=tk.LEFT, anchor="w",
                  bg=self.C_CARD, fg=self.C_TEXT, font=self.F(10, eng=True)
                  ).pack(fill=tk.X, padx=12, pady=6)
-        self._btn(f5, "更新频谱对比图", self.update_plots, primary=True).pack(fill=tk.X, padx=11, pady=(0, 8))
+        self._btn(f5.inner, "更新频谱对比图", self.update_plots, primary=True,
+                  width=self._btn_full).pack(padx=11, pady=(0, 8))
 
         # ---------------- 右侧绘图区 ----------------
         right = self._card(body, "时域波形与 FFT 频谱分析")
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12), pady=10)
-        self.fig = Figure(figsize=(9.0, 7.6), dpi=100)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14), pady=12)
+        fig_dpi = max(100, int(self.winfo_fpixels("1i")))   # 按屏幕 DPI 提高图表分辨率
+        self.fig = Figure(figsize=(9.0, 7.6), dpi=fig_dpi)
         self.axes = self.fig.subplots(2, 2)
         self.fig.subplots_adjust(left=0.07, right=0.97, top=0.93, bottom=0.07,
                                  wspace=0.22, hspace=0.38)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
         # 状态栏（macOS 风格细线分隔）
         tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)

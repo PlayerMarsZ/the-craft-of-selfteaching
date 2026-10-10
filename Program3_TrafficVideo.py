@@ -18,6 +18,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import font as tkfont
 
+# 共享 macOS 主题组件（圆角卡片 / 圆角按钮 / 扁平滑块 / 高DPI适配）
+from ui_theme import enable_hidpi, pick_fonts, round_rect, RCard, RoundBtn, FlatSlider
+
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
@@ -41,10 +44,13 @@ class TrafficGUI(tk.Tk):
     GLASS    = "#FAFAFC"
 
     def __init__(self):
+        enable_hidpi()          # 高 DPI 适配（必须在创建根窗口之前）
         super().__init__()
         self.title("交通视频监控系统")
-        self.geometry("1000x660")
+        self.geometry("1040x700")
         self.minsize(820, 500)
+        # 按屏幕实际 DPI 设置 Tk 缩放，避免高分辨率屏界面发虚
+        self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
         self.configure(bg=self.C_BG)
         self._setup_fonts()
 
@@ -62,80 +68,65 @@ class TrafficGUI(tk.Tk):
 
     def _setup_fonts(self):
         """英文优先 Inter-Medium，中文优先苹方中等（PingFang SC Medium），未安装时逐级回退"""
-        avail = set(tkfont.families(self))
-
-        def pick(candidates, fallback):
-            for c in candidates:
-                if c in avail:
-                    return c
-            return fallback
-
-        self.f_en = pick(["Inter-Medium", "Inter Medium", "Inter",
-                          "SF Pro Text", "Helvetica Neue", "Segoe UI"], "Arial")
-        self.f_cn = pick(["PingFang SC Medium", "PingFangSC-Medium", "PingFang SC",
-                          "Microsoft YaHei UI", "Microsoft YaHei",
-                          "Noto Sans CJK SC", "WenQuanYi Micro Hei"], "SimHei")
+        self.f_en, self.f_cn = pick_fonts(self)
 
     def F(self, size, bold=False, eng=False):
         """界面字体：eng=True 用英文族（Inter），否则用中文族（苹方）"""
         return (self.f_en if eng else self.f_cn, size, "bold" if bold else "normal")
 
-    def _btn(self, parent, text, command, primary=False, width=None, size=10, bold=False):
-        """macOS 风格扁平按钮：primary=True 蓝底白字，否则浅灰底深字"""
-        bg = self.C_ACCENT if primary else self.C_BTN
-        ab = self.C_ACC_D if primary else self.C_BTN_D
-        fg = "#FFFFFF" if primary else self.C_TEXT
-        return tk.Button(parent, text=text, command=command, width=width,
-                         relief=tk.FLAT, bd=0, highlightthickness=0,
-                         bg=bg, fg=fg, activebackground=ab, activeforeground=fg,
-                         font=self.F(size, bold), padx=10, pady=3, cursor="hand2")
+    def _btn(self, parent, text, command, primary=False, width=None, size=10,
+             bold=False, height=30, padx=16):
+        """macOS 风格圆角扁平按钮：width 为像素（None=按文字自适应）"""
+        return RoundBtn(parent, text=text, command=command, primary=primary,
+                        font=self.F(size, bold), width=width, height=height, padx=padx)
 
     def _lab(self, parent, text, size=10, fg=None, bold=False):
         """文字标签：自动继承父面板底色"""
         return tk.Label(parent, text=text, bg=parent["bg"], fg=fg or self.C_TEXT,
                         font=self.F(size, bold))
 
+    def _card(self, parent, title=None):
+        """白色圆角卡片面板（内容放到 card.inner 中）"""
+        card = RCard(parent, fill=self.C_CARD, outline=self.C_LINE, radius=20, pad=12)
+        if title:
+            tk.Label(card.inner, text=title, bg=self.C_CARD, fg=self.C_TEXT,
+                     font=self.F(11, True)).pack(anchor="w", padx=10, pady=(6, 2))
+        return card
+
     # ------------------------- 界面搭建 -------------------------
 
     def _build_ui(self):
-        # 视频显示区（白色卡片 + 深色画布）
-        lf = tk.Frame(self, bg=self.C_CARD, bd=0,
-                      highlightthickness=1, highlightbackground=self.C_LINE)
-        lf.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 6))
-        tk.Label(lf, text="监控画面", bg=self.C_CARD, fg=self.C_TEXT,
-                 font=self.F(11, True, eng=True)).pack(anchor="w", padx=12, pady=(8, 2))
-        self.canvas = tk.Canvas(lf, width=900, height=460, bg=self.C_CANVAS,
+        # 视频显示区（白色圆角卡片 + 深色圆角画布）
+        lf = self._card(self, "监控画面")
+        lf.pack(fill=tk.BOTH, expand=True, padx=14, pady=(14, 6))
+        self.canvas = tk.Canvas(lf.inner, width=900, height=460, bg=self.C_CARD,
                                 highlightthickness=0, bd=0)
-        self.canvas.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        self.canvas.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        # 信息栏（白色卡片内浅灰文字）
-        info_card = tk.Frame(self, bg=self.C_CARD, bd=0,
-                             highlightthickness=1, highlightbackground=self.C_LINE)
-        info_card.pack(fill=tk.X, padx=12, pady=(6, 0))
-        tk.Label(info_card, textvariable=self.info_var, anchor="w", bg=self.C_CARD,
-                 fg=self.C_SUB, font=self.F(10, eng=True), padx=12, pady=6).pack(fill=tk.X)
+        # 信息栏（白色圆角卡片内浅灰文字）
+        info_card = RCard(self, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=8)
+        info_card.pack(fill=tk.X, padx=14, pady=(6, 0))
+        tk.Label(info_card.inner, textvariable=self.info_var, anchor="w", bg=self.C_CARD,
+                 fg=self.C_SUB, font=self.F(10, eng=True), padx=6, pady=4).pack(fill=tk.X)
 
         # 控制栏（macOS 风格：细线分隔 + 浅色底）
         tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
         bar = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-        self._btn(bar, "打开视频", self.open_video, primary=True, width=11).pack(
+        self._btn(bar, "打开视频", self.open_video, primary=True).pack(
             side=tk.LEFT, padx=(14, 5), pady=9)
-        self.btn_play = self._btn(bar, "▶ 播放", self.toggle_play, width=9, size=10, bold=True)
+        self.btn_play = self._btn(bar, "▶ 播放", self.toggle_play, size=10, bold=True)
         self.btn_play.pack(side=tk.LEFT, padx=5, pady=9)
-        self._btn(bar, "停止", self.stop, width=7).pack(side=tk.LEFT, padx=5, pady=9)
-        self._btn(bar, "快进×2", self.set_fast, width=8).pack(side=tk.LEFT, padx=5, pady=9)
-        self._btn(bar, "慢放×0.5", self.set_slow, width=8).pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "停止", self.stop).pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "快进×2", self.set_fast).pack(side=tk.LEFT, padx=5, pady=9)
+        self._btn(bar, "慢放×0.5", self.set_slow).pack(side=tk.LEFT, padx=5, pady=9)
 
-        self._lab(bar, "播放速度", size=9).pack(side=tk.LEFT, padx=(14, 0))
+        self._lab(bar, "播放速度", size=9).pack(side=tk.LEFT, padx=(16, 0))
         self.speed_var = tk.DoubleVar(value=1.0)
-        tk.Scale(bar, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
-                 variable=self.speed_var, length=200,
-                 bg=self.GLASS, fg=self.C_TEXT, troughcolor=self.C_LINE,
-                 activebackground=self.C_ACCENT, highlightthickness=0, bd=0,
-                 font=self.F(9), sliderlength=14
-                 ).pack(side=tk.LEFT, padx=8, pady=8)
+        FlatSlider(bar, variable=self.speed_var, from_=0.25, to=2.0, resolution=0.05,
+                   length=180, font=self.F(9, eng=True)
+                   ).pack(side=tk.LEFT, padx=8, pady=10)
 
         self.loop_var = tk.BooleanVar(value=False)
         tk.Checkbutton(bar, text="循环播放", variable=self.loop_var,
@@ -252,7 +243,7 @@ class TrafficGUI(tk.Tk):
     # ------------------------- 显示 -------------------------
 
     def _show_frame(self, bgr):
-        """把 OpenCV 帧 (BGR) 转 PIL 图像并等比例居中显示到画布"""
+        """把 OpenCV 帧 (BGR) 转 PIL 图像并等比例居中显示到画布（深色圆角底衬托画面）"""
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)   # OpenCV 的 BGR 序转 PIL 用的 RGB 序
         pil = Image.fromarray(rgb)
         cw = self.canvas.winfo_width() or 900
@@ -262,6 +253,8 @@ class TrafficGUI(tk.Tk):
         h = max(1, int(pil.height * r))
         photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS))
         self.canvas.delete("all")
+        # 圆角显示底色：画布本身与卡片同色，圆角外露区域融入卡片背景
+        round_rect(self.canvas, 1, 1, cw, ch, 16, fill=self.C_CANVAS, outline="")
         self.canvas.create_image(cw // 2, ch // 2, image=photo)
         self.canvas.photo = photo      # 保持引用防止被回收
 
