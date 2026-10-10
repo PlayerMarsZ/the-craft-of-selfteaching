@@ -1241,21 +1241,25 @@ class CellSegGUI(tk.Tk):
         reschedule=False 时不再安排后续重排（供 _reflow_compare 调用，防止自我触发死循环）"""
         self._clear_compare()
         self._last_entries = entries    # 记录内容，窗口尺寸变化时自动重排
-        # 自适应排版：在“宽度填充 ≥90%”的前提下选图片最大的列布局（缩略图 150~420px）
+        # ---- 自适应排版：选“宽度填充 ≥97% 且缩略图最大”的列布局，横向铺满整个对比区 ----
+        # 旧版 420px 上限在宽窗口下会让所有列布局都不满足 90% 填充，退化成单列 + 大片空白，
+        # 因此改为按画布真实宽度均分列宽（缩略图限幅 140~520px），保证横排铺满。
         avail = self.cmp_canvas.winfo_width()
         if not avail or avail <= 1:          # 画布尚未完成布局时按常规宽度估算
             avail = 960
         self._cmp_laid_w = avail            # 记录本次排版所用宽度，宽度无变化时不重排
         best_cols, best_thumb = 1, 0
-        for c in (1, 2, 3, 4):
+        for c in (1, 2, 3, 4, 5):           # 最多 5 列；逐列计算均分后的缩略图宽度
             cost = 24 * c + 8 * (c - 1) + 8   # 卡片内外边距 + 网格间距 + 边框
-            t = min((avail - cost) // c, 420)
-            if t < 150:
+            t = min((avail - cost) // c, 520)
+            if t < 140:
                 continue
-            if t * c + cost >= avail * 0.90 and t > best_thumb:
+            fill = (t * c + cost) / avail     # 该布局的宽度填充率
+            if fill >= 0.97 and t > best_thumb:
                 best_cols, best_thumb = c, t
-        if best_thumb == 0:                  # 无满足 90% 填充的布局时退化为单列大图
-            best_cols, best_thumb = 1, max(140, min(420, avail - 32))
+        if best_thumb == 0:                  # 极小宽度兜底：单列也尽量铺满可用宽度
+            best_cols = 1
+            best_thumb = max(120, min(520, avail - 32))
         cols, thumb = best_cols, best_thumb
         # 布局定版后按真实画布宽度再核对一次（一次性，宽度无变化则跳过，避免反复重建）
         if reschedule:
