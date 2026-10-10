@@ -547,8 +547,14 @@ class CellSegGUI(tk.Tk):
         """把 numpy 图像等比例缩放后绘制到指定画布中央；
         原图区(orig)与结果区(res)共享同一视图（同步缩放/平移），放大后图像可超出画布边框，
         被裁部分可拖动查看；对比区缩略图(cmp*)始终保持适应窗口显示"""
-        cw = canvas.winfo_width() or fallback
-        ch = canvas.winfo_height() or fallback
+        # 注意：刚创建尚未完成布局的画布 winfo_width 返回 1（truthy），
+        # 必须把它当作“尺寸未知”回退到预设尺寸，否则图像会被缩成 1 像素导致只见灰色背景
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw <= 1:
+            cw = fallback
+        if ch <= 1:
+            ch = fallback
         pil = Image.fromarray(np.asarray(arr))
         # 基础适配比例：保证整图放入画布且不变形
         r0 = min(cw / pil.width, ch / pil.height, 1.0)
@@ -764,12 +770,17 @@ class CellSegGUI(tk.Tk):
     def _show_compare(self, entries):
         """entries: [(标题, 图像数组)]，以缩略图网格形式显示在对比区"""
         self._clear_compare()
+        boxes = []
         for i, (title, arr) in enumerate(entries):
             box = tk.Frame(self.cmp_frame, bd=1, relief=tk.SUNKEN)
             box.grid(row=i // 4, column=i % 4, padx=4, pady=4)   # 每行 4 个缩略图
             tk.Label(box, text=title, font=("", 9)).pack()
             cv = tk.Canvas(box, width=200, height=200, bg="#333")
             cv.pack()
+            boxes.append((cv, arr))
+        # 先完成几何布局（update_idletasks），再绘制图像，确保能取到缩略图画布的真实尺寸
+        self.update_idletasks()
+        for i, (cv, arr) in enumerate(boxes):
             self._show(cv, arr, "cmp%d" % i, fallback=200)
 
     def edge_compare(self):
@@ -843,8 +854,12 @@ class CellSegGUI(tk.Tk):
         z_new = min(16.0, max(0.2, z_old * factor))
         if abs(z_new - z_old) < 1e-9:
             return
-        cw = self.canvas_res.winfo_width() or 480
-        ch = self.canvas_res.winfo_height() or 480
+        cw = self.canvas_res.winfo_width()
+        ch = self.canvas_res.winfo_height()
+        if cw <= 1:
+            cw = 480
+        if ch <= 1:
+            ch = 480
         if mx is None:
             mx, my = cw / 2.0, ch / 2.0
         # 锚点不动条件：光标下图像点相对画布中心的偏移，在缩放前后按比例保持不变
@@ -859,8 +874,12 @@ class CellSegGUI(tk.Tk):
         v = self.view["res"]
         if self._res_view_arr is None:
             return
-        cw = self.canvas_res.winfo_width() or 480
-        ch = self.canvas_res.winfo_height() or 480
+        cw = self.canvas_res.winfo_width()
+        ch = self.canvas_res.winfo_height()
+        if cw <= 1:
+            cw = 480
+        if ch <= 1:
+            ch = 480
         h_img, w_img = self._res_view_arr.shape[:2]
         r0 = min(cw / w_img, ch / h_img, 1.0)
         zoom = v["zoom"]
