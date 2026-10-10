@@ -569,7 +569,8 @@ def watershed_segment(img, fg_coef=0.35):
         for _ in range(14):
             mid = (lo + hi) / 2.0
             _, sf = cv2.threshold(dist, mid * dist.max(), 255, cv2.THRESH_BINARY)
-            cnt = cv2.connectedComponents(sf)[0] - 1
+            # threshold 对 float32 距离图返回 float32，而 connectedComponents 要求 8 位整型
+            cnt = cv2.connectedComponents(np.uint8(sf))[0] - 1
             if cnt > 64:
                 lo = mid
             else:
