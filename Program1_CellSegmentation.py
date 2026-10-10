@@ -352,9 +352,8 @@ class CellSegGUI(tk.Tk):
         self.scale_slider = tk.Scale(row, from_=0.25, to=2.0, resolution=0.05, orient=tk.HORIZONTAL,
                                      variable=self.scale_var, length=170, command=self._on_scale)
         self.scale_slider.pack(side=tk.LEFT)
-        # 按下时锁定基准（此时值尚未被拖动改变），松开时自动应用
+        # 按下时锁定基准（此时值尚未被拖动改变）；拖动仅做预览，点【应用缩放】后才正式生效
         self.scale_slider.bind("<ButtonPress-1>", self._scale_begin)
-        self.scale_slider.bind("<ButtonRelease-1>", self._scale_release)
         tk.Button(f1, text="应用缩放", width=18, command=self.do_scale).pack(pady=2)
 
         row = tk.Frame(f1); row.pack(fill=tk.X, padx=4)
@@ -363,9 +362,8 @@ class CellSegGUI(tk.Tk):
         self.rot_slider = tk.Scale(row, from_=-180, to=180, resolution=1, orient=tk.HORIZONTAL,
                                    variable=self.rot_var, length=170, command=self._on_rotate)
         self.rot_slider.pack(side=tk.LEFT)
-        # 与缩放相同的按下锁定/松开应用交互
+        # 与缩放相同的交互：按下锁定基准，拖动仅预览，点【应用旋转】后才正式生效
         self.rot_slider.bind("<ButtonPress-1>", self._rot_begin)
-        self.rot_slider.bind("<ButtonRelease-1>", self._rot_release)
         tk.Button(f1, text="应用旋转", width=18, command=self.do_rotate).pack(pady=2)
 
         self.crop_btn = tk.Button(f1, text="裁剪（在原图上拖拽框选区域）", width=30, command=self.toggle_crop)
@@ -622,11 +620,6 @@ class CellSegGUI(tk.Tk):
         self._scale_base = self.current.copy()
         self._scale_base_val = self.scale_var.get()
 
-    def _scale_release(self, _e=None):
-        """松开缩放滑块：自动把当前预览提交为正式结果（习惯按钮的也可点【应用缩放】）"""
-        if self._scale_base is not None:
-            self.do_scale()
-
     def _on_scale(self, *_):
         """缩放滑块回调：按 v/拖动前基准 实时预览缩放效果"""
         if self.current is None:
@@ -647,11 +640,6 @@ class CellSegGUI(tk.Tk):
         self._rot_base = self.current.copy()
         self._rot_base_val = self.rot_var.get()
 
-    def _rot_release(self, _e=None):
-        """松开旋转滑块：自动提交预览结果"""
-        if self._rot_base is not None:
-            self.do_rotate()
-
     def _on_rotate(self, *_):
         """旋转滑块回调：按 (当前角度-拖动前角度) 实时预览旋转效果"""
         if self.current is None:
@@ -666,8 +654,9 @@ class CellSegGUI(tk.Tk):
             pass
 
     def do_scale(self):
-        """应用缩放：把按下滑块后的预览结果提交为正式结果，滑块随后复位到 1.0（无变化位）。
-        语义：拖到 v 即相对“拖动开始时看到的图像”缩放 v 倍；要回原尺寸请点工具栏【重置】"""
+        """应用缩放（点击按钮才生效）：把按下滑块后的预览结果提交为正式结果，
+        滑块随后复位到 1.0（无变化位）。语义：拖到 v 即相对“拖动开始时看到的图像”缩放 v 倍；
+        拖动只是预览，只有点击【应用缩放】才会改变处理结果；要回原尺寸请点工具栏【重置】"""
         if self.current is None:
             messagebox.showwarning("提示", "请先打开图像")
             return
@@ -690,8 +679,9 @@ class CellSegGUI(tk.Tk):
         self.update_display()
 
     def do_rotate(self):
-        """应用旋转：把按下滑块后的预览结果提交为正式结果，滑块随后复位到 0°（无变化位）。
-        语义：拖到 θ° 即相对“拖动开始时看到的图像”旋转 θ 度"""
+        """应用旋转（点击按钮才生效）：把按下滑块后的预览结果提交为正式结果，
+        滑块随后复位到 0°（无变化位）。语义：拖到 θ° 即相对“拖动开始时看到的图像”旋转 θ 度；
+        拖动只是预览，只有点击【应用旋转】才会改变处理结果"""
         if self.current is None:
             messagebox.showwarning("提示", "请先打开图像")
             return
