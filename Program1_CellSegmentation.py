@@ -609,6 +609,7 @@ class CellSegGUI(tk.Tk):
         self._scale_base_val = 1.0  # 基准图像对应的滑块值
         self._rot_base = None       # 旋转拖动时的基准图像
         self._rot_base_val = 0.0    # 基准图像对应的滑块角度
+        self._edge_base = None      # 边缘算子的共同基准图（切换算子时替换上一个结果）
         self.result_text = tk.StringVar(value="提示：点击【生成示例细胞图】即可无图演示")
 
         self._build_toolbar()
@@ -761,7 +762,7 @@ class CellSegGUI(tk.Tk):
                  ("Laplacian", edge_laplacian), ("LoG", edge_log), ("Canny", edge_canny)]
         GRID_W = (FULL - 16) // 3      # 3 列小按钮宽度
         for i, (name, func) in enumerate(edges):
-            self._btn(grid, name, lambda f=func, n=name: self.apply_op(f, n + " 边缘提取"),
+            self._btn(grid, name, lambda f=func, n=name: self.do_edge(f, n + " 边缘提取"),
                       width=GRID_W, size=9, padx=6).grid(row=i // 3, column=i % 3, padx=2, pady=2)
         self._btn(f3.inner, "全部边缘结果对比", self.edge_compare, width=FULL).pack(padx=10, pady=(8, 10))
 
@@ -1011,6 +1012,29 @@ class CellSegGUI(tk.Tk):
 
     # ------------------------- 各类操作 -------------------------
 
+    def do_edge(self, func, name):
+        """应用边缘提取：6 种算子互不叠加。
+        第一次选算子时锁定当前图像（保留此前的前处理）作为共同基准，
+        之后切换其它算子都作用在该基准上，自动取消上一个算子的效果。"""
+        if self.original is None:
+            messagebox.showwarning("提示", "请先打开图像")
+            return
+        base = self._edge_base if self._edge_base is not None else self.current
+        try:
+            self.current = func(base)
+        except RuntimeError as e:
+            messagebox.showerror("缺少依赖", str(e))
+            return
+        except Exception as e:
+            messagebox.showerror("处理出错", str(e))
+            return
+        self._reset_preview_bases()
+        self._edge_base = base            # 保留基准，供下一次切换算子时替换
+        self.result_text.set("当前操作: %s（尺寸 %d×%d）" %
+                             (name, self.current.shape[1], self.current.shape[0]))
+        self._clear_compare()
+        self.update_display()
+
     def apply_op(self, func, name):
         if self.current is None:
             messagebox.showwarning("提示", "请先打开图像")
@@ -1032,9 +1056,10 @@ class CellSegGUI(tk.Tk):
     # --------------------- 缩放 / 旋转（滑块实时预览 + 按钮提交） ---------------------
 
     def _reset_preview_bases(self):
-        """处理操作改变当前图像后调用：滑块基准清零，结果区视图复位到适应窗口"""
+        """处理操作改变当前图像后调用：滑块基准清零，结果区视图复位到适应窗口，边缘基准作废"""
         self._scale_base = None
         self._rot_base = None
+        self._edge_base = None
         self._reset_res_view()
 
     def _scale_begin(self, _e=None):
