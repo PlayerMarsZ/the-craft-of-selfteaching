@@ -506,62 +506,84 @@ def otsu_threshold(img):
     return binary.astype(np.uint8), T
 
 
+def otsu_foreground(img):
+    """
+    Otsu 粗分割并自动选择前景极性：
+    病理图像中细胞既可能是深色（H&E 染色）也可能是亮色（荧光/反相），
+    对象通常占面积较小的那一侧，因此取面积小的一侧为前景（255=对象）。
+    若两侧面积都太小（近纯色图）则取大的一侧，避免掩膜为空。
+    """
+    g = to_gray(img)
+    _, T = otsu_threshold(g)
+    bright = (g > T)
+    dark = ~bright
+    fg = dark if dark.mean() <= bright.mean() else bright
+    if fg.mean() < 0.005:
+        fg = ~fg
+    return np.uint8(fg) * 255
+
+
 def watershed_segment(img, fg_coef=0.35):
     """
-    自适应分水岭分割：
-    1) 用 Sobel 梯度幅值构造地形图；
-    2) 形态学开运算+膨胀确定确定背景；
-    3) 距离变换按最大值比例自适应确定前景标记（fg_coef 越大前景越少）；
-    4) 分水岭变换，输出按区域随机着色的分割图，红色线为分割边界。
+    自适应分水岭分割（标准 marker-based 流程）：
+    1) Otsu 自动极性粗分割得到对象掩膜（自适应，无需人工设阈值）；
+    2) 开运算去细噪声 → 膨胀确定背景（sure_bg）；
+    3) 对【二值掩膜】做距离变换（对象中心距离最大），
+       按距离最大值的比例自适应确定前景标记（fg_coef 越大标记越少）；
+    4) 分水岭变换在平滑灰度图上生长，输出随机着色分割图，红色线为边界。
     """
     if not HAS_CV2:
         raise RuntimeError("分水岭分割需要 OpenCV：pip install opencv-python")
     gray = to_gray(img)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    gx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
-    gy = cv2.Sobel(blur, cv2.CV_64F, 0, 1, ksize=3)
-    grad = cv2.normalize(cv2.magnitude(gx, gy), None, 0, 255,
-                         cv2.NORM_MINMAX).astype(np.uint8)
+    mask = otsu_foreground(gray)        # 255=对象（Otsu 自适应极性）
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    opening = cv2.morphologyEx(grad, cv2.MORPH_OPEN, kernel, iterations=2)
-    sure_bg = cv2.dilate(opening, kernel, iterations=3)
+    opening = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)   # 去细噪声
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)                      # 确定背景
+    # 对二值掩膜做距离变换：对象中心处距离最大，是可靠的前景标记位置
     dist = cv2.distanceTransform(opening, cv2.DIST_L2, 5)
     # 自适应阈值：按距离图最大值的比例确定前景，避免人为设定绝对阈值
     th = fg_coef * dist.max()
-    _, sure_fg = cv2.threshold(dist, th, 1.0, cv2.THRESH_BINARY)
-    sure_fg = np.uint8(sure_fg)
-    unknown = cv2.subtract(sure_bg, sure_fg)
+    _, sure_fg = cv2.threshold(dist, th, 255, cv2.THRESH_BINARY)
+    sure_fg = sure_fg.astype(np.uint8)
+    unknown = cv2.subtract(sure_bg, sure_fg)   # 对象边缘带：待分水岭竞争分配
     n, markers = cv2.connectedComponents(sure_fg)
+    if n <= 1:                  # 前景系数过高未找到标记时，用 Otsu 轮廓作兜底显示
+        edge = cv2.Canny(mask, 80, 160)
+        vis = np.zeros(gray.shape + (3,), np.uint8)
+        vis[:] = (250, 250, 250)
+        vis[edge > 0] = (0, 0, 255)
+        return vis, 0
     markers = markers + 1                 # 背景标记为 1
     markers[unknown == 255] = 0           # 未知区域标记为 0
-    color_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    markers = cv2.watershed(color_img, markers)
+    # 在平滑灰度图上运行分水岭：未知区域由背景与各前景标记竞争生长
+    markers = cv2.watershed(cv2.cvtColor(blur, cv2.COLOR_GRAY2BGR), markers)
 
     labels = markers.copy()
     labels[labels == -1] = 0              # 分水岭脊线（边界）
-    n_lab = int(labels.max())
+    n_lab = int(labels.max()) - 1         # 前景区域个数（不含背景标记 1）
     rng = np.random.default_rng(42)
-    palette = {0: np.array([250, 250, 250])}
-    for lab in range(1, n_lab + 1):
+    palette = {0: np.array([0, 0, 255], np.uint8),      # 边界：红色
+               1: np.array([240, 240, 240], np.uint8)}  # 背景：浅灰
+    for lab in range(2, n_lab + 2):
         palette[lab] = rng.integers(60, 230, 3)
     vis = np.zeros(gray.shape + (3,), np.uint8)
-    for lab in range(n_lab + 1):
+    for lab in range(n_lab + 2):
         vis[labels == lab] = palette[lab]
-    vis[markers == -1] = (0, 0, 255)      # 边界用红色标出
     return vis, n_lab
 
 
 def combined_segment(img, smax=7, fg_coef=0.35):
     """
     组合式自适应分割（创新方法）：
-    自适应中值滤波去噪 → Otsu 粗分割得到前景掩膜 → 分水岭精修，
-    并把 Otsu 判为背景的区域强制置为背景，抑制过分割。
+    自适应中值滤波去噪 → Otsu 自适应极性粗分割得到对象掩膜 → 分水岭精修，
+    并把 Otsu 判为非对象的背景区域强制置黑，抑制背景过分割。
     """
     den = adaptive_median_filter(img, smax)
-    bin_otsu, _ = otsu_threshold(den)
+    mask = otsu_foreground(den)         # 对象掩膜（与分水岭内部一致的自适应极性）
     ws, n = watershed_segment(den, fg_coef)
     out = ws.copy()
-    out[bin_otsu == 0] = (0, 0, 0)
+    out[mask == 0] = (0, 0, 0)          # 背景（非对象区）强制置黑
     return out, n
 
 
