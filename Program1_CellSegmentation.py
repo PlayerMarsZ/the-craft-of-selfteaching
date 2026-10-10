@@ -612,6 +612,7 @@ class CellSegGUI(tk.Tk):
         self._edge_base = None      # 边缘算子的共同基准图（切换算子时替换上一个结果）
         self._last_entries = None   # 最近一次对比区内容（窗口尺寸变化时自动重排）
         self._cmp_reflow_id = None  # 对比区重排防抖定时器句柄
+        self._cmp_laid_w = 0        # 最近一次排版时使用的画布宽度
         self.result_text = tk.StringVar(value="提示：点击【生成示例细胞图】即可无图演示")
 
         self._build_toolbar()
@@ -1235,14 +1236,16 @@ class CellSegGUI(tk.Tk):
         """按当前内容重新计算对比区滚动范围（内容增减 / 窗口清空后调用）"""
         self.cmp_canvas.configure(scrollregion=self.cmp_canvas.bbox("all"))
 
-    def _show_compare(self, entries):
-        """entries: [(标题, 图像数组)]，以缩略图网格自适应排版显示在对比区（可滚动查看全部）"""
+    def _show_compare(self, entries, reschedule=True):
+        """entries: [(标题, 图像数组)]，以缩略图网格自适应排版显示在对比区（可滚动查看全部）。
+        reschedule=False 时不再安排后续重排（供 _reflow_compare 调用，防止自我触发死循环）"""
         self._clear_compare()
         self._last_entries = entries    # 记录内容，窗口尺寸变化时自动重排
         # 自适应排版：在“宽度填充 ≥90%”的前提下选图片最大的列布局（缩略图 150~420px）
         avail = self.cmp_canvas.winfo_width()
         if not avail or avail <= 1:          # 画布尚未完成布局时按常规宽度估算
             avail = 960
+        self._cmp_laid_w = avail            # 记录本次排版所用宽度，宽度无变化时不重排
         best_cols, best_thumb = 1, 0
         for c in (1, 2, 3, 4):
             cost = 24 * c + 8 * (c - 1) + 8   # 卡片内外边距 + 网格间距 + 边框
@@ -1254,13 +1257,14 @@ class CellSegGUI(tk.Tk):
         if best_thumb == 0:                  # 无满足 90% 填充的布局时退化为单列大图
             best_cols, best_thumb = 1, max(140, min(420, avail - 32))
         cols, thumb = best_cols, best_thumb
-        # 布局定版后按真实画布宽度自动重排一次（保险：防止首帧按估算宽度排版）
-        if self._cmp_reflow_id:
-            try:
-                self.after_cancel(self._cmp_reflow_id)
-            except Exception:
-                pass
-        self._cmp_reflow_id = self.after(260, self._reflow_compare)
+        # 布局定版后按真实画布宽度再核对一次（一次性，宽度无变化则跳过，避免反复重建）
+        if reschedule:
+            if self._cmp_reflow_id:
+                try:
+                    self.after_cancel(self._cmp_reflow_id)
+                except Exception:
+                    pass
+            self._cmp_reflow_id = self.after(260, self._reflow_compare)
         boxes = []
         for i, (title, arr) in enumerate(entries):
             box = RCard(self.cmp_frame, fill=self.C_CARD, outline=self.C_LINE, radius=12, pad=5)
@@ -1293,10 +1297,16 @@ class CellSegGUI(tk.Tk):
             self._cmp_reflow_id = self.after(180, self._reflow_compare)
 
     def _reflow_compare(self):
-        """按最新宽度重新自适应排版对比区缩略图"""
+        """宽度确有变化时才按新宽度重排（不再自我调度，避免反复重建界面）"""
         self._cmp_reflow_id = None
-        if getattr(self, "_last_entries", None):
-            self._show_compare(self._last_entries)
+        if not getattr(self, "_last_entries", None):
+            return
+        w = self.cmp_canvas.winfo_width()
+        if not w or w <= 1:
+            return
+        if abs(w - getattr(self, "_cmp_laid_w", w)) < 16:
+            return
+        self._show_compare(self._last_entries, reschedule=False)
 
     def _bind_scroll_wheel(self, widget):
         """给对比区部件绑定滚轮，跨平台支持（Windows/macOS 与 Linux）"""
