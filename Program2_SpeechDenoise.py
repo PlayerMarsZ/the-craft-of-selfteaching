@@ -34,6 +34,7 @@ from tkinter import font as tkfont
 # =====================================================================
 
 import os
+import time
 
 # macOS 设计规范：颜色
 COLORS = dict(
@@ -505,7 +506,11 @@ class SpeechGUI(tk.Tk):
         enable_hidpi()          # 高 DPI 适配（必须在创建根窗口之前）
         super().__init__()
         self.title("语音采集及降噪系统")
-        self.geometry("1500x880")
+        # 按屏幕实际可用尺寸夹取窗口大小，避免窗口高于屏幕导致底部状态栏被挤出可视区
+        self._scr_w = self.winfo_screenwidth()
+        self._scr_h = self.winfo_screenheight()
+        self.geometry("%dx%d" % (min(1500, self._scr_w - 40),
+                                 min(880, self._scr_h - 90)))
         self.minsize(1100, 620)      # 最终最小尺寸在界面构建完成后按内容实际宽度重新设定
         # 按屏幕实际 DPI 设置 Tk 缩放，避免高分辨率屏界面发虚
         self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
@@ -520,6 +525,9 @@ class SpeechGUI(tk.Tk):
         self.noisy = None          # 加噪信号
         self.denoised = None       # 去噪信号
         self._rec_cancel = False   # 取消录音标志
+        self._rec_timer_id = None   # 采集倒计时 after 句柄
+        self._rec_until = 0.0       # 本段采集的结束时刻（time.time()）
+        self._rec_var = tk.StringVar(value="采集空闲")   # ①卡片内采集状态提示（倒计时）
         self.status_var = tk.StringVar(value="请先【生成测试音频】/【开始采集】/【打开音频】")
         self.metric_var = tk.StringVar(value="")
 
@@ -615,6 +623,14 @@ class SpeechGUI(tk.Tk):
         row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=2)
         self._btn(row, "开始采集", self.start_record, primary=True).pack(side=tk.LEFT, padx=(0, 6))
         self._btn(row, "停止采集", self.stop_record).pack(side=tk.LEFT, padx=6)
+        # 采集状态提示（● 圆点 + 倒计时）：采集中红色闪烁并显示剩余秒数，替代被挤出的底部状态栏
+        row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(4, 2))
+        self._rec_dot = tk.Label(row, text="●", bg=self.C_CARD, fg="#C7C7CC",
+                                 font=(self.f_cn, 8))
+        self._rec_dot.pack(side=tk.LEFT)
+        self._rec_lab = tk.Label(row, textvariable=self._rec_var, bg=self.C_CARD,
+                                 fg=self.C_SUB, font=self.F(10))
+        self._rec_lab.pack(side=tk.LEFT, padx=(4, 0))
         row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(2, 8))
         self._btn(row, "打开音频文件", self.open_audio).pack(side=tk.LEFT, padx=(0, 6))
         self._btn(row, "保存当前信号WAV", self.save_signal).pack(side=tk.LEFT, padx=6)
@@ -708,15 +724,17 @@ class SpeechGUI(tk.Tk):
         right = self._card(body, "时域波形与 FFT 频谱分析")
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14), pady=12)
         fig_dpi = max(100, int(self.winfo_fpixels("1i")))   # 按屏幕 DPI 提高图表分辨率
-        self.fig = Figure(figsize=(9.0, 7.6), dpi=fig_dpi)
+        # 初始图形尺寸取偏小值：随后 <Configure> 回调会按画布真实大小重设，
+        # 保证 2×2 子图（含全部坐标轴文字）始终完整可见、不再被画布裁掉下半部分
+        self.fig = Figure(figsize=(6.0, 4.6), dpi=fig_dpi)
         self.axes = self.fig.subplots(2, 2)
         self.fig.subplots_adjust(left=0.08, right=0.98, top=0.93, bottom=0.08,
                                  wspace=0.24, hspace=0.42)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        # 窗口缩放时按新尺寸重新排版子图（防抖），避免坐标轴文字互相重叠或超出边界
-        self.canvas.get_tk_widget().bind("<Configure>", self._on_fig_resize)
+        # 画布尺寸变化：图形按画布实际像素重设尺寸并防抖重排，子图随窗口缩放始终填满且完整
+        self.canvas.get_tk_widget().bind("<Configure>", self._on_canvas_resize)
 
         # 状态栏（macOS 风格细线分隔）
         tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
@@ -735,7 +753,8 @@ class SpeechGUI(tk.Tk):
         for _b in self._full_btns:
             _b.configure(width=self._btn_full)
             _b._draw(_b._fill)                  # 立即按新宽度重绘
-        self.minsize(ctrl_w + 800, 640)         # 右侧绘图区至少保留约 800px 宽
+        self.minsize(min(ctrl_w + 800, self._scr_w - 40),
+                      min(640, self._scr_h - 90))   # 最小尺寸不超过屏幕可用范围
         # 面板内任意位置滚轮滚动（内容超过面板高度时）
         self._bind_wheel_recursive(ctrl)
 
@@ -759,8 +778,17 @@ class SpeechGUI(tk.Tk):
             steps = -2
         self._ctrl_canvas.yview_scroll(steps, "units")
 
-    def _on_fig_resize(self, _e):
-        """绘图区尺寸变化：防抖后重新排版子图，避免刻度文字重叠/出界"""
+    def _on_canvas_resize(self, e):
+        """画布尺寸变化：先按画布实际像素重设图形尺寸（保证子图完整可见），
+        再防抖重排，避免刻度文字重叠/出界"""
+        if e.width < 40 or e.height < 40:
+            return
+        try:
+            _dpi = self.fig.dpi
+            # 图形英寸 = 画布像素 / DPI，图形与画布严格等大，杜绝“显示不全/留白”
+            self.fig.set_size_inches(e.width / _dpi, e.height / _dpi, forward=False)
+        except Exception:
+            pass
         if self._fig_redraw_id:
             try:
                 self.after_cancel(self._fig_redraw_id)
@@ -791,8 +819,47 @@ class SpeechGUI(tk.Tk):
             return
         self._rec_cancel = False
         self.status_var.set("采集中……（点击【停止采集】结束）")
+        # ①卡片内启动倒计时提示：红点闪烁 + 剩余秒数实时刷新
+        self._set_rec_state("准备采集…", "#FF9500")
+        self._rec_until = time.time() + dur
+        if self._rec_timer_id:
+            try:
+                self.after_cancel(self._rec_timer_id)
+            except Exception:
+                pass
+        self._tick_record()
         # 后台线程录音，避免阻塞 GUI 主线程
         threading.Thread(target=self._record_worker, args=(fs, dur), daemon=True).start()
+
+    # ---- 采集倒计时提示（①卡片内，替代容易被挤出屏幕的底部状态栏） ----
+
+    def _set_rec_state(self, text, dot_color):
+        """设置采集状态文字与●圆点颜色"""
+        self._rec_var.set(text)
+        try:
+            self._rec_dot.config(fg=dot_color)
+        except Exception:
+            pass
+
+    def _tick_record(self):
+        """每 100ms 刷新一次剩余倒计时；采集中红点闪烁"""
+        self._rec_timer_id = None
+        if self._rec_cancel:
+            return
+        try:
+            remain = self._rec_until - time.time()
+            if remain <= 0:
+                self._set_rec_state("收尾中…", "#FF9500")
+                self._rec_timer_id = self.after(120, self._tick_record)
+                return
+            if int(remain * 2) % 2 == 0:          # 红点 0.5s 间隔闪烁
+                dot = "#FF3B30"
+            else:
+                dot = "#FFD1CE"
+            self._set_rec_state("采集中… 剩余 %.1f s" % remain, dot)
+            self._rec_timer_id = self.after(100, self._tick_record)
+        except Exception:
+            pass        # 窗口关闭后的残留回调忽略
 
     def _record_worker(self, fs, dur):
         """录音线程：录完后必须经 after() 回到主线程更新界面（Tk 非线程安全）"""
@@ -812,12 +879,38 @@ class SpeechGUI(tk.Tk):
                 sd.stop()
             except Exception:
                 pass
+        if self._rec_timer_id:
+            try:
+                self.after_cancel(self._rec_timer_id)
+            except Exception:
+                pass
+            self._rec_timer_id = None
+        self._set_rec_state("采集已停止", "#FF9500")
         self.status_var.set("采集已停止")
+
+    def _rec_idle_later(self, seconds=3.0):
+        """倒计时结束一段时间后恢复空闲态（若期间又开始采集则跳过）"""
+        try:
+            self.after(int(seconds * 1000), self._rec_idle_after)
+        except Exception:
+            pass
+
+    def _rec_idle_after(self):
+        if self._rec_timer_id is None:
+            self._set_rec_state("采集空闲", "#C7C7CC")
 
     def _apply_recorded(self, x, fs):
         self.original = np.asarray(x, np.float64)
         self.fs = fs
         self.noisy = self.denoised = None
+        if self._rec_timer_id:
+            try:
+                self.after_cancel(self._rec_timer_id)
+            except Exception:
+                pass
+            self._rec_timer_id = None
+        self._set_rec_state("采集完成（%.1f s）" % (len(x) / float(fs)), "#2FBF5F")
+        self._rec_idle_later(3.0)          # 3 秒后恢复“采集空闲”
         self.status_var.set("采集完成：%d 个采样点 @ %d Hz" % (len(x), fs))
         self.update_plots()
 
