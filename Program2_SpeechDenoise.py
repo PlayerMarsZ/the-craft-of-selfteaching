@@ -514,6 +514,12 @@ class SpeechGUI(tk.Tk):
         self.minsize(1100, 620)      # 最终最小尺寸在界面构建完成后按内容实际宽度重新设定
         # 按屏幕实际 DPI 设置 Tk 缩放，避免高分辨率屏界面发虚
         self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
+        # Tk 缩放系数（高分屏 >1）：winfo_width 给的是“Tk 单位”，
+        # 换算成真实物理像素必须乘它，否则 matplotlib 图形会小于画布
+        try:
+            self._tk_scale = float(self.tk.call("tk", "scaling"))
+        except Exception:
+            self._tk_scale = 1.0
         self.configure(bg=self.C_BG)
         self._setup_fonts()
         self._btn_full = 400    # 左侧面板卡片内通栏按钮宽度（像素，构建完成后按面板实际宽度更新）
@@ -800,8 +806,11 @@ class SpeechGUI(tk.Tk):
         self._last_fig_px = (e.width, e.height)
         try:
             _dpi = self.fig.dpi
-            # 图形英寸 = 画布像素 / DPI，图形与画布严格等大，杜绝“显示不全/留白”
-            self.fig.set_size_inches(e.width / _dpi, e.height / _dpi, forward=False)
+            # 关键换算：画布 winfo 尺寸是 Tk 单位，物理像素 = 单位 × tk 缩放系数。
+            # 高分屏上不乘该系数，图形会比画布小一圈，只占左上角、其余空白
+            _w_px = e.width * self._tk_scale
+            _h_px = e.height * self._tk_scale
+            self.fig.set_size_inches(_w_px / _dpi, _h_px / _dpi, forward=False)
         except Exception:
             pass
         if self._fig_redraw_id:
@@ -816,9 +825,29 @@ class SpeechGUI(tk.Tk):
         try:
             self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
                                   h_pad=2.2, w_pad=2.4)
+            self._fit_canvas_photo()
             self.canvas.draw()          # 同步完整重绘，避免部分子图残留未渲染
         except Exception:
             pass        # 窗口关闭等场景下的残留回调，忽略即可
+
+    def _fit_canvas_photo(self):
+        """确保 Tk 位图尺寸与图形物理像素一致。
+        matplotlib 部分版本（如 3.6.x）在图形尺寸变化后不会自动重建位图，
+        导致图形只显示在画布左上角、其余大面积空白——这里按需重建位图并重新贴图。"""
+        try:
+            pw, ph = self.canvas.get_width_height()
+            pw, ph = int(round(pw)), int(round(ph))
+            photo = getattr(self.canvas, "_tkphoto", None)
+            if photo is None or int(photo.width()) != pw or int(photo.height()) != ph:
+                try:
+                    self.canvas.delete("all")       # 清掉旧位图显示项
+                except Exception:
+                    pass
+                self.canvas._tkphoto = tk.PhotoImage(
+                    master=self.canvas.get_tk_widget(), width=pw, height=ph)
+                self.canvas.create_image(0, 0, image=self.canvas._tkphoto, anchor="nw")
+        except Exception:
+            pass
 
     # ------------------------- 语音采集 -------------------------
 
@@ -1133,6 +1162,7 @@ class SpeechGUI(tk.Tk):
                                   h_pad=2.2, w_pad=2.4)
         except Exception:
             pass
+        self._fit_canvas_photo()   # 位图尺寸与图形一致后才重绘
         self.canvas.draw()      # 强制完整重绘，保证全屏/缩放后全部子图渲染完整
         self._update_metrics()
 
