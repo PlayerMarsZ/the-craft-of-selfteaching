@@ -529,7 +529,6 @@ class SpeechGUI(tk.Tk):
         self._rec_until = 0.0       # 本段采集的结束时刻（time.time()）
         self._rec_var = tk.StringVar(value="采集空闲")   # ①卡片内采集状态提示（倒计时）
         self.status_var = tk.StringVar(value="请先【生成测试音频】/【开始采集】/【打开音频】")
-        self.metric_var = tk.StringVar(value="")
 
         self._build_ui()
 
@@ -712,9 +711,20 @@ class SpeechGUI(tk.Tk):
         f5 = self._card(ctrl, "⑤　去噪效果分析（SNR / MSE）")
         f5.pack(fill=tk.X, pady=(0, 12))
         self._cards_ref.append(f5)
-        tk.Label(f5.inner, textvariable=self.metric_var, justify=tk.LEFT, anchor="w",
-                 bg=self.C_CARD, fg=self.C_TEXT, font=self.F(10, eng=True)
-                 ).pack(fill=tk.X, padx=12, pady=6)
+        # 指标记录区：加高文本框并配竖向滚动条，指标多行时滚动查看，不再被截断
+        mrow = tk.Frame(f5.inner, bg=self.C_CARD)
+        mrow.pack(fill=tk.X, padx=11, pady=(6, 0))
+        self._metrics_scroll = tk.Scrollbar(mrow, orient=tk.VERTICAL, width=10,
+                                            bg="#D9D9E0", troughcolor=self.C_CARD, bd=0,
+                                            highlightthickness=0, activebackground=self.C_SUB)
+        self._metrics_text = tk.Text(mrow, height=8, wrap="word", relief=tk.FLAT, bd=0,
+                                     bg="#FAFAFC", fg=self.C_TEXT, font=self.F(10, eng=True),
+                                     highlightthickness=0, padx=8, pady=6,
+                                     state=tk.DISABLED, cursor="arrow",
+                                     yscrollcommand=self._metrics_scroll.set)
+        self._metrics_scroll.config(command=self._metrics_text.yview)
+        self._metrics_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._metrics_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         _b = self._btn(f5.inner, "更新频谱对比图", self.update_plots, primary=True,
                       width=self._btn_full)
         _b.pack(padx=11, pady=(0, 8))
@@ -759,6 +769,8 @@ class SpeechGUI(tk.Tk):
         self._bind_wheel_recursive(ctrl)
 
         self.update_plots()
+        # 首次布局/字体解析完成后，再全量重排重绘一次，确保第一屏即完整显示
+        self.after(300, self._fig_tight)
 
     # ------------------------- 面板滚轮滚动 / 绘图区自适应 -------------------------
 
@@ -783,6 +795,9 @@ class SpeechGUI(tk.Tk):
         再防抖重排，避免刻度文字重叠/出界"""
         if e.width < 40 or e.height < 40:
             return
+        if getattr(self, "_last_fig_px", None) == (e.width, e.height):
+            return                       # 同尺寸重复事件（如 set_size_inches 引发）直接跳过
+        self._last_fig_px = (e.width, e.height)
         try:
             _dpi = self.fig.dpi
             # 图形英寸 = 画布像素 / DPI，图形与画布严格等大，杜绝“显示不全/留白”
@@ -800,8 +815,8 @@ class SpeechGUI(tk.Tk):
         self._fig_redraw_id = None
         try:
             self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
-                                  h_pad=2.4, w_pad=2.6)
-            self.canvas.draw_idle()
+                                  h_pad=2.2, w_pad=2.4)
+            self.canvas.draw()          # 同步完整重绘，避免部分子图残留未渲染
         except Exception:
             pass        # 窗口关闭等场景下的残留回调，忽略即可
 
@@ -1067,14 +1082,13 @@ class SpeechGUI(tk.Tk):
             ax.grid(True, color="#E3E3E8", linewidth=0.6, alpha=0.7)
             for s in ("top", "right"):
                 ax.spines[s].set_visible(False)
-            # 缩小刻度字号、稀疏刻度数量、收紧刻度与轴线间距，
-            # 窗口缩小时坐标轴文字不再互相重叠或超出子图边界
-            ax.tick_params(axis="both", labelsize=8, pad=2.5, length=3)
+            # 精简字号：刻度最小、坐标轴标签次之、标题略大，整体排版紧凑不拥挤
+            ax.tick_params(axis="both", labelsize=7.5, pad=2, length=3)
             ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
             ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
-            ax.title.set_fontsize(10)
-            ax.xaxis.label.set_fontsize(9)
-            ax.yaxis.label.set_fontsize(9)
+            ax.title.set_fontsize(9.5)
+            ax.xaxis.label.set_fontsize(8.5)
+            ax.yaxis.label.set_fontsize(8.5)
         if self.original is None:
             self.canvas.draw_idle()
             return
@@ -1084,20 +1098,20 @@ class SpeechGUI(tk.Tk):
         ax3, ax4 = self.axes[1]
 
         ax1.plot(self._thin(t), self._thin(self.original), lw=0.6, color="#1f77b4")
-        ax1.set_title("原始信号时域波形")
-        ax1.set_xlabel("时间 (s)")
+        ax1.set_title("原始信号")
+        ax1.set_xlabel("时间(s)")
         ax1.set_ylabel("幅值")
 
         if self.noisy is not None:
             ax2.plot(self._thin(t), self._thin(self.noisy), lw=0.6, color="#d62728")
-        ax2.set_title("加噪信号时域波形" if self.noisy is not None else "加噪信号（未生成）")
-        ax2.set_xlabel("时间 (s)")
+        ax2.set_title("加噪信号" if self.noisy is not None else "加噪信号（未生成）")
+        ax2.set_xlabel("时间(s)")
         ax2.set_ylabel("幅值")
 
         if self.denoised is not None:
             ax3.plot(self._thin(t), self._thin(self.denoised), lw=0.6, color="#2ca02c")
-        ax3.set_title("去噪信号时域波形" if self.denoised is not None else "去噪信号（未生成）")
-        ax3.set_xlabel("时间 (s)")
+        ax3.set_title("去噪信号" if self.denoised is not None else "去噪信号（未生成）")
+        ax3.set_xlabel("时间(s)")
         ax3.set_ylabel("幅值")
 
         # FFT 频谱对比（去噪前后）
@@ -1109,22 +1123,22 @@ class SpeechGUI(tk.Tk):
         if self.denoised is not None:
             f3, mag3 = fft_spectrum(self.denoised, self.fs)
             ax4.plot(f3, mag3, lw=0.6, color="#2ca02c", alpha=0.9, label="去噪后")
-        ax4.set_title("FFT 幅度谱对比（去噪前后）")
-        ax4.set_xlabel("频率 (Hz)")
-        ax4.set_ylabel("幅度 (dB)")
-        ax4.legend(loc="upper right", fontsize=8)
+        ax4.set_title("幅度谱对比")
+        ax4.set_xlabel("频率(Hz)")
+        ax4.set_ylabel("幅度(dB)")
+        ax4.legend(loc="upper right", fontsize=7.5, frameon=False, handlelength=1.6)
 
         try:
             self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
-                                  h_pad=2.4, w_pad=2.6)
+                                  h_pad=2.2, w_pad=2.4)
         except Exception:
             pass
-        self.canvas.draw_idle()
+        self.canvas.draw()      # 强制完整重绘，保证全屏/缩放后全部子图渲染完整
         self._update_metrics()
 
     def _update_metrics(self):
         if self.original is None:
-            self.metric_var.set("")
+            self._set_metrics([])
             return
         lines = ["采样率: %d Hz   点数: %d" % (self.fs, len(self.original))]
         if self.noisy is not None:
@@ -1138,7 +1152,18 @@ class SpeechGUI(tk.Tk):
                 lines.append("信噪比提升 = %+6.2f dB" % (sn2 - snr_db(self.original, self.noisy)))
         elif self.noisy is not None:
             lines.append("（去噪后效果：请先执行去噪）")
-        self.metric_var.set("\n".join(lines))
+        self._set_metrics(lines)
+
+    def _set_metrics(self, lines):
+        """把指标文本写入⑤卡片滚动记录区（只读文本控件，多行可滚）"""
+        try:
+            self._metrics_text.config(state=tk.NORMAL)
+            self._metrics_text.delete("1.0", tk.END)
+            if lines:
+                self._metrics_text.insert("1.0", "\n".join(lines))
+            self._metrics_text.config(state=tk.DISABLED)
+        except Exception:
+            pass
 
 
 def main():
