@@ -397,30 +397,35 @@ def adaptive_median_filter(img, smax=7):
               否则输出 Zmed（滤除脉冲噪声）。
     该算法在去噪的同时比标准中值滤波更好地保留边缘细节。
     彩色图像按 R/G/B 三个通道分别滤波，保持色彩信息（不转灰度）。
+
+    性能优化：窗口极小值/中值/极大值分别用 ndimage 的 minimum/median/maximum_filter
+    滑动窗口算子（C 实现）一次性算出，A/B 两级判断按整幅图向量化完成，
+    与逐像素循环版结果完全一致，速度提升数百倍（大图不再卡顿）。
     """
-    def _am2d(gray):
-        """单通道自适应中值滤波核心循环"""
-        h, w = gray.shape
+    def _am2d(g):
+        """单通道自适应中值滤波（向量化实现，语义与逐像素版逐像素等价）"""
+        g = np.asarray(g, dtype=np.float64)
+        h, w = g.shape
         pad = smax // 2
-        p = np.pad(gray, pad, mode="reflect")
-        out = np.empty_like(gray)
         sizes = list(range(3, smax + 1, 2))
-        for i in range(h):
-            for j in range(w):
-                zxy = gray[i, j]
-                result = zxy
-                for s in sizes:
-                    r = s // 2
-                    win = p[i:i + s, j:j + s]
-                    zmin = win.min()
-                    zmed = np.median(win)
-                    zmax = win.max()
-                    if zmin < zmed < zmax:                 # A 级通过 → B 级
-                        result = zxy if zmin < zxy < zmax else zmed
-                        break
-                    else:                                   # 窗口继续增大
-                        result = zmed
-                out[i, j] = result
+        # 与逐像素版完全一致的边界填充与取窗方式：
+        # 原版对 p[i:i+s] 取窗（窗口相对中心有上偏），这里对 p 整体滤波后
+        # 按同样的偏移 [r:r+h] 取样，保证每个窗口内容与逐像素版一模一样
+        p = np.pad(g, pad, mode="reflect")
+        done = np.zeros((h, w), bool)            # 已通过 A 级并完成 B 级输出的像素
+        out = np.zeros((h, w), np.float64)
+        for s in sizes:
+            r = s // 2
+            mn = ndimage.minimum_filter(p, size=s)[r:r + h, r:r + w]
+            md = ndimage.median_filter(p, size=s)[r:r + h, r:r + w]
+            mx = ndimage.maximum_filter(p, size=s)[r:r + h, r:r + w]
+            level_a = (~done) & (mn < md) & (md < mx)   # A 级通过且尚未定稿
+            # 未定稿像素先取当前窗口中值（若此后尺寸都不满足 A 级，
+            # 最终保留的就是最大窗口 Smax 的中值，与逐像素版一致）
+            out[~done] = md[~done]
+            keep = level_a & (g > mn) & (g < mx)        # B 级：Zmin<Zxy<Zmax 保留原值
+            out[keep] = g[keep]
+            done |= level_a
         return out
 
     if img.ndim == 3:                       # 彩色：逐通道滤波后合并，保留颜色
@@ -1520,19 +1525,26 @@ class CellSegGUI(tk.Tk):
         if self.current is None:
             messagebox.showwarning("提示", "请先打开图像")
             return
-        entries = [("原图(灰度)", to_gray(self.current))]
-        bw, T = otsu_threshold(self.current)
-        entries.append(("Otsu分割 T=%d" % T, bw))
+        # 分割计算较重（滤波/形态学/分水岭），计算前切换沙漏光标并提示，避免界面看似卡死
+        self.config(cursor="watch")
+        self.result_text.set("正在计算分割结果对比…")
+        self.update_idletasks()
         try:
-            ws, n = watershed_segment(self.current, self.fgcoef_var.get())
-            entries.append(("自适应分水岭 (%d区)" % n, ws))
-            cb, n2 = combined_segment(self.current, self.smax_var.get(),
-                                      self.fgcoef_var.get())
-            entries.append(("组合式分割 (%d区)" % n2, cb))
-        except RuntimeError as e:
-            messagebox.showwarning("缺少依赖", str(e))
-        self._show_compare(entries)
-        self.result_text.set("已生成 Otsu / 分水岭 / 组合式分割结果对比")
+            entries = [("原图(灰度)", to_gray(self.current))]
+            bw, T = otsu_threshold(self.current)
+            entries.append(("Otsu分割 T=%d" % T, bw))
+            try:
+                ws, n = watershed_segment(self.current, self.fgcoef_var.get())
+                entries.append(("自适应分水岭 (%d区)" % n, ws))
+                cb, n2 = combined_segment(self.current, self.smax_var.get(),
+                                          self.fgcoef_var.get())
+                entries.append(("组合式分割 (%d区)" % n2, cb))
+            except RuntimeError as e:
+                messagebox.showwarning("缺少依赖", str(e))
+            self._show_compare(entries)
+            self.result_text.set("已生成 Otsu / 分水岭 / 组合式分割结果对比")
+        finally:
+            self.config(cursor="")
 
     # ---------------- 左右框联动放大预览（滚轮缩放 / 拖动平移 / 双击复位） ----------------
 
