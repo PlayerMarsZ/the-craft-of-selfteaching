@@ -287,10 +287,12 @@ class FlatSlider(tk.Canvas):
         if frac > 1e-4:
             ex = self._x0 + frac * self._len
             round_rect(self, self._x0, cy - 2, ex, cy + 2, 2, fill=self._act, outline="")
-        # 白色圆形滑钮
+        # 圆形滑钮：底部浅灰衬影 + 白色主体 + 细描边（更有质感的小圆钮）
         tx = self._x0 + frac * self._len
-        self.create_oval(tx - 8, cy - 8, tx + 8, cy + 8,
-                         fill="#FFFFFF", outline="#D0D0D7", width=1)
+        self.create_oval(tx - 8, cy - 6, tx + 8, cy + 10,
+                         fill="#E4E4EA", outline="")
+        self.create_oval(tx - 7, cy - 8, tx + 7, cy + 8,
+                         fill="#FFFFFF", outline="#B9BAC5", width=1)
         # 右侧数值（分辨率 >=1 显示整数，否则两位小数；左对齐防止右侧被截断）
         if self._res >= 1:
             txt = "%d" % int(round(self.get()))
@@ -298,6 +300,61 @@ class FlatSlider(tk.Canvas):
             txt = "%.2f" % self.get()
         self.create_text(x1 + 10, cy, text=txt, anchor="w",
                          fill=COLORS["SUB"], font=self._font)
+
+class RoundRadio(tk.Canvas):
+    """macOS 风格圆形单选钮（替代系统原生小黑点圆钮）：
+    未选中 = 浅灰圆环；悬停 = 蓝色圆环；选中 = 蓝色实心圆 + 白色圆点；
+    点击即选中并写入 variable（外部 set 时同步刷新），可携带 command 回调"""
+
+    def __init__(self, master, text="", variable=None, value=0,
+                 command=None, font=None, height=24):
+        self._var = variable
+        self._val = value
+        self._cmd = command
+        self._font = font
+        self._text = text
+        self._hover = False
+        try:
+            t_w = tkfont.Font(font=font).measure(text)
+        except Exception:
+            t_w = len(text) * 10
+        width = 24 + t_w             # 圆圈(20px) + 文字（含间距留白）
+        super().__init__(master, width=width, height=height,
+                         highlightthickness=0, bd=0, bg=master["bg"],
+                         cursor="hand2")
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<Configure>", lambda e: self._draw())
+        if variable is not None:
+            variable.trace_add("write", lambda *a: self._draw())   # 外部变更同步
+        self._draw()
+
+    def _set_hover(self, v):
+        self._hover = v
+        self._draw()
+
+    def _on_click(self, _e):
+        if self._var is not None:
+            self._var.set(self._val)
+        if self._cmd is not None:
+            self._cmd()
+
+    def _draw(self):
+        self.delete("all")
+        h = max(self.winfo_height(), 24)
+        cy = h // 2
+        sel = self._var is not None and self._var.get() == self._val
+        if self._hover:                          # 悬停：蓝色圆环
+            self.create_oval(2, cy - 8, 18, cy + 8, outline="#4FA8FF", width=1.5)
+        elif not sel:                            # 未选中：浅灰圆环
+            self.create_oval(2, cy - 8, 18, cy + 8, outline="#C7C7CC", width=1.5)
+        else:                                    # 选中：蓝色实心圆 + 白色圆点
+            self.create_oval(2, cy - 8, 18, cy + 8, fill="#0A84FF", outline="")
+            self.create_oval(7.5, cy - 2.5, 12.5, cy + 2.5, fill="#FFFFFF", outline="")
+        self.create_text(24, cy, text=self._text, anchor="w",
+                         fill=COLORS["TEXT"], font=self._font)
+
 
 import numpy as np
 from scipy.io import wavfile
@@ -308,6 +365,7 @@ matplotlib.use("TkAgg")
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib import rcParams
+from matplotlib.ticker import MaxNLocator
 
 # macOS 风格绘图字体：中文优先苹方中等、英文优先 Inter-Medium，逐级回退保证跨平台
 rcParams["font.sans-serif"] = ["PingFang SC Medium", "PingFang SC", "Inter Medium",
@@ -448,12 +506,14 @@ class SpeechGUI(tk.Tk):
         super().__init__()
         self.title("语音采集及降噪系统")
         self.geometry("1500x880")
-        self.minsize(1200, 700)
+        self.minsize(1100, 620)      # 最终最小尺寸在界面构建完成后按内容实际宽度重新设定
         # 按屏幕实际 DPI 设置 Tk 缩放，避免高分辨率屏界面发虚
         self.tk.call("tk", "scaling", self.winfo_fpixels("1i") / 72.0)
         self.configure(bg=self.C_BG)
         self._setup_fonts()
-        self._btn_full = 400    # 左侧面板卡片内通栏按钮宽度（像素）
+        self._btn_full = 400    # 左侧面板卡片内通栏按钮宽度（像素，构建完成后按面板实际宽度更新）
+        self._full_btns = []    # 通栏按钮列表（面板宽度确定后统一调整宽度）
+        self._fig_redraw_id = None   # 绘图区缩放重排防抖定时器
 
         self.fs = 16000            # 当前采样率
         self.original = None       # 原始语音 float64 数组
@@ -492,12 +552,10 @@ class SpeechGUI(tk.Tk):
         return FlatSlider(parent, variable=var, from_=frm, to=to, resolution=res,
                           length=length, command=command, font=self.F(size, eng=True))
 
-    def _radio(self, parent, text, var, value, size=10):
-        """白底单选按钮（卡片内使用）"""
-        return tk.Radiobutton(parent, text=text, variable=var, value=value,
-                              bg=self.C_CARD, fg=self.C_TEXT, activebackground=self.C_CARD,
-                              activeforeground=self.C_ACCENT, selectcolor=self.C_CARD,
-                              highlightthickness=0, bd=0, font=self.F(size))
+    def _radio(self, parent, text, var, value, size=10, command=None):
+        """macOS 风格圆形单选钮（Canvas 自绘，替代系统原生小黑点）"""
+        return RoundRadio(parent, text=text, variable=var, value=value, command=command,
+                          font=self.F(size))
 
     def _card(self, parent, title=None):
         """白色圆角卡片面板（内容放到 card.inner 中）"""
@@ -513,14 +571,33 @@ class SpeechGUI(tk.Tk):
         body = tk.Frame(self, bg=self.C_BG)
         body.pack(fill=tk.BOTH, expand=True)
 
-        # ---------------- 左侧控制面板 ----------------
-        ctrl = tk.Frame(body, width=452, bg=self.C_BG)
-        ctrl.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 6), pady=10)
-        ctrl.pack_propagate(False)
+        # ---------------- 左侧控制面板（可滚动，宽度按内容自动适配） ----------------
+        # 面板可滚动：窗口缩小时内容不再被裁切，滚轮即可查看下半部分
+        ctrl_wrap = tk.Frame(body, width=560, bg=self.C_BG)
+        ctrl_wrap.pack(side=tk.LEFT, fill=tk.Y, padx=(12, 6), pady=10)
+        ctrl_wrap.pack_propagate(False)
+        self._ctrl_canvas = tk.Canvas(ctrl_wrap, bg=self.C_BG, highlightthickness=0)
+        self._ctrl_scroll = tk.Scrollbar(ctrl_wrap, orient=tk.VERTICAL, width=10,
+                                         command=self._ctrl_canvas.yview, bg="#D9D9E0",
+                                         troughcolor=self.C_BG, bd=0, highlightthickness=0,
+                                         activebackground=self.C_SUB)
+        self._ctrl_canvas.configure(yscrollcommand=self._ctrl_scroll.set)
+        self._ctrl_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._ctrl_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ctrl = tk.Frame(self._ctrl_canvas, bg=self.C_BG)
+        self._ctrl_window = self._ctrl_canvas.create_window((0, 0), window=ctrl, anchor="nw")
+        # 内容高度变化时更新滚动范围；画布宽度变化时内容窗口跟随
+        ctrl.bind("<Configure>",
+                  lambda e: self._ctrl_canvas.configure(scrollregion=self._ctrl_canvas.bbox("all")))
+        self._ctrl_canvas.bind("<Configure>",
+                               lambda e: self._ctrl_canvas.itemconfigure(
+                                   self._ctrl_window, width=e.width))
+        self._cards_ref = []    # 用于构建完成后测量内容实际需求宽度
 
         # ① 语音采集 / 文件读写
         f1 = self._card(ctrl, "①　语音采集 / 读写")
         f1.pack(fill=tk.X, pady=(0, 10))
+        self._cards_ref.append(f1)
         row = tk.Frame(f1.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 2))
         self._lab(row, "采样率", size=9).pack(side=tk.LEFT)
         self.fs_combo = ttk.Combobox(row, values=["8000", "16000", "44100"],
@@ -546,6 +623,7 @@ class SpeechGUI(tk.Tk):
         # ② 语音播放
         f2 = self._card(ctrl, "②　语音播放")
         f2.pack(fill=tk.X, pady=(0, 12))
+        self._cards_ref.append(f2)
         row = tk.Frame(f2.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._lab(row, "播放源", size=9).pack(side=tk.LEFT)
         self.play_src = tk.IntVar(value=0)
@@ -568,6 +646,7 @@ class SpeechGUI(tk.Tk):
         # ③ 加噪
         f3 = self._card(ctrl, "③　加噪（2 种噪声）")
         f3.pack(fill=tk.X, pady=(0, 12))
+        self._cards_ref.append(f3)
         self.noise_type = tk.IntVar(value=0)
         row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._radio(row, "高斯白噪声", self.noise_type, 0).pack(side=tk.LEFT)
@@ -579,11 +658,14 @@ class SpeechGUI(tk.Tk):
         self._lab(row, "密度(%)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.dens_var = tk.DoubleVar(value=5.0)
         self._slider(row, self.dens_var, 0, 50, 0.5, 150).pack(side=tk.LEFT, padx=6)
-        self._btn(f3.inner, "执行加噪", self.do_add_noise, width=self._btn_full).pack(padx=11, pady=(4, 8))
+        _b = self._btn(f3.inner, "执行加噪", self.do_add_noise, width=self._btn_full)
+        _b.pack(padx=11, pady=(4, 8))
+        self._full_btns.append(_b)
 
         # ④ 去噪
         f4 = self._card(ctrl, "④　去噪（3 种算法）")
         f4.pack(fill=tk.X, pady=(0, 12))
+        self._cards_ref.append(f4)
         self.denoise_type = tk.IntVar(value=0)
         row = tk.Frame(f4.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._radio(row, "维纳", self.denoise_type, 0).pack(side=tk.LEFT)
@@ -606,16 +688,21 @@ class SpeechGUI(tk.Tk):
         self._lab(row, "阈值系数", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.wl_thr_var = tk.DoubleVar(value=0.5)
         self._slider(row, self.wl_thr_var, 0.1, 2.0, 0.1, 80).pack(side=tk.LEFT, padx=4)
-        self._btn(f4.inner, "执行去噪", self.do_denoise, width=self._btn_full).pack(padx=11, pady=(6, 8))
+        _b = self._btn(f4.inner, "执行去噪", self.do_denoise, width=self._btn_full)
+        _b.pack(padx=11, pady=(6, 8))
+        self._full_btns.append(_b)
 
         # ⑤ 效果分析
         f5 = self._card(ctrl, "⑤　去噪效果分析（SNR / MSE）")
         f5.pack(fill=tk.X, pady=(0, 12))
+        self._cards_ref.append(f5)
         tk.Label(f5.inner, textvariable=self.metric_var, justify=tk.LEFT, anchor="w",
                  bg=self.C_CARD, fg=self.C_TEXT, font=self.F(10, eng=True)
                  ).pack(fill=tk.X, padx=12, pady=6)
-        self._btn(f5.inner, "更新频谱对比图", self.update_plots, primary=True,
-                  width=self._btn_full).pack(padx=11, pady=(0, 8))
+        _b = self._btn(f5.inner, "更新频谱对比图", self.update_plots, primary=True,
+                      width=self._btn_full)
+        _b.pack(padx=11, pady=(0, 8))
+        self._full_btns.append(_b)
 
         # ---------------- 右侧绘图区 ----------------
         right = self._card(body, "时域波形与 FFT 频谱分析")
@@ -623,18 +710,72 @@ class SpeechGUI(tk.Tk):
         fig_dpi = max(100, int(self.winfo_fpixels("1i")))   # 按屏幕 DPI 提高图表分辨率
         self.fig = Figure(figsize=(9.0, 7.6), dpi=fig_dpi)
         self.axes = self.fig.subplots(2, 2)
-        self.fig.subplots_adjust(left=0.07, right=0.97, top=0.93, bottom=0.07,
-                                 wspace=0.22, hspace=0.38)
+        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.93, bottom=0.08,
+                                 wspace=0.24, hspace=0.42)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        # 窗口缩放时按新尺寸重新排版子图（防抖），避免坐标轴文字互相重叠或超出边界
+        self.canvas.get_tk_widget().bind("<Configure>", self._on_fig_resize)
 
         # 状态栏（macOS 风格细线分隔）
         tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
         tk.Label(self, textvariable=self.status_var, anchor="w", bg=self.GLASS,
                  fg=self.C_OK, font=self.F(10), padx=12, pady=5).pack(side=tk.BOTTOM, fill=tk.X)
 
+        # ---- 面板宽度按内容实际需求自适应（高 DPI 下字体变宽也不截断控件） ----
+        self.update_idletasks()
+        need = 470
+        for _c in self._cards_ref:
+            need = max(need, _c.winfo_reqwidth() + 2)
+        ctrl_w = min(620, max(470, need))       # 面板宽度上限 620，避免挤压绘图区
+        ctrl_wrap.configure(width=ctrl_w + 12)  # +12 = 竖向滚动条宽度
+        self._btn_full = ctrl_w - 24 - 22       # 通栏按钮铺满卡片内容区
+        self.update_idletasks()
+        for _b in self._full_btns:
+            _b.configure(width=self._btn_full)
+            _b._draw(_b._fill)                  # 立即按新宽度重绘
+        self.minsize(ctrl_w + 800, 640)         # 右侧绘图区至少保留约 800px 宽
+        # 面板内任意位置滚轮滚动（内容超过面板高度时）
+        self._bind_wheel_recursive(ctrl)
+
         self.update_plots()
+
+    # ------------------------- 面板滚轮滚动 / 绘图区自适应 -------------------------
+
+    def _bind_wheel_recursive(self, w):
+        """给面板容器及其全部子孙控件绑定滚轮，悬停任意位置都能滚动面板"""
+        w.bind("<MouseWheel>", self._on_panel_wheel)   # Windows / macOS
+        w.bind("<Button-4>", self._on_panel_wheel)     # Linux 滚轮向上
+        w.bind("<Button-5>", self._on_panel_wheel)     # Linux 滚轮向下
+        for child in w.winfo_children():
+            self._bind_wheel_recursive(child)
+
+    def _on_panel_wheel(self, e):
+        """滚轮滚动左侧控制面板"""
+        if getattr(e, "num", None) == 5 or getattr(e, "delta", 0) < 0:
+            steps = 2
+        else:
+            steps = -2
+        self._ctrl_canvas.yview_scroll(steps, "units")
+
+    def _on_fig_resize(self, _e):
+        """绘图区尺寸变化：防抖后重新排版子图，避免刻度文字重叠/出界"""
+        if self._fig_redraw_id:
+            try:
+                self.after_cancel(self._fig_redraw_id)
+            except Exception:
+                pass
+        self._fig_redraw_id = self.after(160, self._fig_tight)
+
+    def _fig_tight(self):
+        self._fig_redraw_id = None
+        try:
+            self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
+                                  h_pad=2.4, w_pad=2.6)
+            self.canvas.draw_idle()
+        except Exception:
+            pass        # 窗口关闭等场景下的残留回调，忽略即可
 
     # ------------------------- 语音采集 -------------------------
 
@@ -833,6 +974,14 @@ class SpeechGUI(tk.Tk):
             ax.grid(True, color="#E3E3E8", linewidth=0.6, alpha=0.7)
             for s in ("top", "right"):
                 ax.spines[s].set_visible(False)
+            # 缩小刻度字号、稀疏刻度数量、收紧刻度与轴线间距，
+            # 窗口缩小时坐标轴文字不再互相重叠或超出子图边界
+            ax.tick_params(axis="both", labelsize=8, pad=2.5, length=3)
+            ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
+            ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+            ax.title.set_fontsize(10)
+            ax.xaxis.label.set_fontsize(9)
+            ax.yaxis.label.set_fontsize(9)
         if self.original is None:
             self.canvas.draw_idle()
             return
@@ -873,7 +1022,8 @@ class SpeechGUI(tk.Tk):
         ax4.legend(loc="upper right", fontsize=8)
 
         try:
-            self.fig.tight_layout()
+            self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
+                                  h_pad=2.4, w_pad=2.6)
         except Exception:
             pass
         self.canvas.draw_idle()
