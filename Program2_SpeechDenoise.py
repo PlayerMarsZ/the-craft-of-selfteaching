@@ -747,6 +747,7 @@ class SpeechGUI(tk.Tk):
         self.fig.subplots_adjust(left=0.08, right=0.98, top=0.93, bottom=0.08,
                                  wspace=0.24, hspace=0.42)
         self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
+        self._fig_master = right.inner          # 画布重建时的父容器
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         # 画布尺寸变化：图形按画布实际像素重设尺寸并防抖重排，子图随窗口缩放始终填满且完整
@@ -775,8 +776,8 @@ class SpeechGUI(tk.Tk):
         self._bind_wheel_recursive(ctrl)
 
         self.update_plots()
-        # 首次布局/字体解析完成后，再全量重排重绘一次，确保第一屏即完整显示
-        self.after(300, self._fig_tight)
+        # 首次布局完成后重建一次画布：首屏即以真实尺寸渲染，避免初始位图尺寸不匹配
+        self.after(300, self._rebuild_fig_canvas)
 
     # ------------------------- 面板滚轮滚动 / 绘图区自适应 -------------------------
 
@@ -797,19 +798,20 @@ class SpeechGUI(tk.Tk):
         self._ctrl_canvas.yview_scroll(steps, "units")
 
     def _on_canvas_resize(self, e):
-        """画布尺寸变化：先按画布实际像素重设图形尺寸（保证子图完整可见），
-        再防抖重排，避免刻度文字重叠/出界"""
+        """画布尺寸变化：图形像素与画布物理像素不一致时，重设图形尺寸并防抖重建画布
+        （重建后 matplotlib 首帧即生成正确尺寸的位图，兼容各版本，杜绝“显示不全/空白”）"""
         if e.width < 40 or e.height < 40:
             return
         if getattr(self, "_last_fig_px", None) == (e.width, e.height):
-            return                       # 同尺寸重复事件（如 set_size_inches 引发）直接跳过
+            return                       # 同尺寸重复事件直接跳过
         self._last_fig_px = (e.width, e.height)
         try:
             _dpi = self.fig.dpi
-            # 关键换算：画布 winfo 尺寸是 Tk 单位，物理像素 = 单位 × tk 缩放系数。
-            # 高分屏上不乘该系数，图形会比画布小一圈，只占左上角、其余空白
-            _w_px = e.width * self._tk_scale
+            _w_px = e.width * self._tk_scale   # Tk 单位 → 物理像素
             _h_px = e.height * self._tk_scale
+            fig_w, fig_h = self.fig.get_size_inches()
+            if abs(fig_w * _dpi - _w_px) < 3 and abs(fig_h * _dpi - _h_px) < 3:
+                return                   # 已等大，无需重建
             self.fig.set_size_inches(_w_px / _dpi, _h_px / _dpi, forward=False)
         except Exception:
             pass
@@ -818,36 +820,40 @@ class SpeechGUI(tk.Tk):
                 self.after_cancel(self._fig_redraw_id)
             except Exception:
                 pass
-        self._fig_redraw_id = self.after(160, self._fig_tight)
+        self._fig_redraw_id = self.after(180, self._rebuild_fig_canvas)
+
+    def _rebuild_fig_canvas(self):
+        """重建绘图画布：销毁旧 TkAgg 部件后按当前图形尺寸新建并绑定。
+        对比手动重建 PhotoImage，此方式在任何 matplotlib 版本下都稳定。"""
+        self._fig_redraw_id = None
+        try:
+            old = self.canvas
+            try:
+                old.get_tk_widget().destroy()
+            except Exception:
+                pass
+            self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_master)
+            widget = self.canvas.get_tk_widget()
+            widget.configure(bg=self.C_CARD, highlightthickness=0)
+            widget.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+            widget.bind("<Configure>", self._on_canvas_resize)
+            try:
+                self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
+                                      h_pad=2.2, w_pad=2.4)
+            except Exception:
+                pass
+            self.canvas.draw()
+        except Exception:
+            pass        # 关窗等场景的残留回调忽略
 
     def _fig_tight(self):
         self._fig_redraw_id = None
         try:
             self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
                                   h_pad=2.2, w_pad=2.4)
-            self._fit_canvas_photo()
             self.canvas.draw()          # 同步完整重绘，避免部分子图残留未渲染
         except Exception:
             pass        # 窗口关闭等场景下的残留回调，忽略即可
-
-    def _fit_canvas_photo(self):
-        """确保 Tk 位图尺寸与图形物理像素一致。
-        matplotlib 部分版本（如 3.6.x）在图形尺寸变化后不会自动重建位图，
-        导致图形只显示在画布左上角、其余大面积空白——这里按需重建位图并重新贴图。"""
-        try:
-            pw, ph = self.canvas.get_width_height()
-            pw, ph = int(round(pw)), int(round(ph))
-            photo = getattr(self.canvas, "_tkphoto", None)
-            if photo is None or int(photo.width()) != pw or int(photo.height()) != ph:
-                try:
-                    self.canvas.delete("all")       # 清掉旧位图显示项
-                except Exception:
-                    pass
-                self.canvas._tkphoto = tk.PhotoImage(
-                    master=self.canvas.get_tk_widget(), width=pw, height=ph)
-                self.canvas.create_image(0, 0, image=self.canvas._tkphoto, anchor="nw")
-        except Exception:
-            pass
 
     # ------------------------- 语音采集 -------------------------
 
@@ -1162,7 +1168,6 @@ class SpeechGUI(tk.Tk):
                                   h_pad=2.2, w_pad=2.4)
         except Exception:
             pass
-        self._fit_canvas_photo()   # 位图尺寸与图形一致后才重绘
         self.canvas.draw()      # 强制完整重绘，保证全屏/缩放后全部子图渲染完整
         self._update_metrics()
 
