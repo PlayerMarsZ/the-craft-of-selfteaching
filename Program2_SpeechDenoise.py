@@ -744,8 +744,10 @@ class SpeechGUI(tk.Tk):
         # 保证 2×2 子图（含全部坐标轴文字）始终完整可见、不再被画布裁掉下半部分
         self.fig = Figure(figsize=(6.0, 4.6), dpi=fig_dpi)
         self.axes = self.fig.subplots(2, 2)
-        self.fig.subplots_adjust(left=0.08, right=0.98, top=0.93, bottom=0.08,
-                                 wspace=0.24, hspace=0.42)
+        # 固定比例边距（分数制）：任何画布尺寸都按比例缩放、永远生效。
+        # 不用 tight_layout —— 高缩放屏幕下其最小边距计算会失败(警告且不排版)，
+        # 导致子图/刻度文字挤成一团
+        self._apply_fig_margins()
         self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
         self._fig_master = right.inner          # 画布重建时的父容器
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
@@ -822,6 +824,12 @@ class SpeechGUI(tk.Tk):
                 pass
         self._fig_redraw_id = self.after(180, self._rebuild_fig_canvas)
 
+    def _apply_fig_margins(self):
+        """固定比例边距：左/右/上/下与行列间距均为图形分数，
+        任何窗口尺寸下都按比例生效，刻度文字不会互相挤占"""
+        self.fig.subplots_adjust(left=0.09, right=0.985, top=0.90, bottom=0.09,
+                                 wspace=0.24, hspace=0.42)
+
     def _rebuild_fig_canvas(self):
         """重建绘图画布：销毁旧 TkAgg 部件后按当前图形尺寸新建并绑定。
         对比手动重建 PhotoImage，此方式在任何 matplotlib 版本下都稳定。"""
@@ -837,11 +845,7 @@ class SpeechGUI(tk.Tk):
             widget.configure(bg=self.C_CARD, highlightthickness=0)
             widget.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
             widget.bind("<Configure>", self._on_canvas_resize)
-            try:
-                self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
-                                      h_pad=2.2, w_pad=2.4)
-            except Exception:
-                pass
+            self._apply_fig_margins()
             self.canvas.draw()
         except Exception:
             pass        # 关窗等场景的残留回调忽略
@@ -849,8 +853,7 @@ class SpeechGUI(tk.Tk):
     def _fig_tight(self):
         self._fig_redraw_id = None
         try:
-            self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
-                                  h_pad=2.2, w_pad=2.4)
+            self._apply_fig_margins()
             self.canvas.draw()          # 同步完整重绘，避免部分子图残留未渲染
         except Exception:
             pass        # 窗口关闭等场景下的残留回调，忽略即可
@@ -1163,11 +1166,7 @@ class SpeechGUI(tk.Tk):
         ax4.set_ylabel("幅度(dB)")
         ax4.legend(loc="upper right", fontsize=7.5, frameon=False, handlelength=1.6)
 
-        try:
-            self.fig.tight_layout(rect=(0.02, 0.03, 0.995, 0.99),
-                                  h_pad=2.2, w_pad=2.4)
-        except Exception:
-            pass
+        self._apply_fig_margins()   # 固定比例边距排版（任何尺寸稳定生效）
         self.canvas.draw()      # 强制完整重绘，保证全屏/缩放后全部子图渲染完整
         self._update_metrics()
 
