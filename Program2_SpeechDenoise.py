@@ -360,10 +360,14 @@ class RoundRadio(tk.Canvas):
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import wiener, resample
+from PIL import Image, ImageTk
 
 import matplotlib
-matplotlib.use("TkAgg")
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# 绘图显示改用 Agg 离屏渲染 + PIL 位图 + 普通 tk 画布（与程序 1 相同的显示路径，
+# 已在用户机器上验证可行），彻底绕开 TkAgg 嵌入在部分 Windows 环境下的
+# 位图不刷新/尺寸反馈回路等问题
+matplotlib.use("Agg")
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib import rcParams
 from matplotlib.ticker import MaxNLocator
@@ -534,7 +538,8 @@ class SpeechGUI(tk.Tk):
         self._rec_timer_id = None   # 采集倒计时 after 句柄
         self._rec_until = 0.0       # 本段采集的结束时刻（time.time()）
         self._rec_var = tk.StringVar(value="采集空闲")   # ①卡片内采集状态提示（倒计时）
-        self.status_var = tk.StringVar(value="请先【生成测试音频】/【开始采集】/【打开音频】")
+        self.status_var = tk.StringVar(
+            value="【渲染引擎 v11-PIL】请先【生成测试音频】/【开始采集】/【打开音频】")
 
         self._build_ui()
 
@@ -744,21 +749,24 @@ class SpeechGUI(tk.Tk):
         # 保证 2×2 子图（含全部坐标轴文字）始终完整可见、不再被画布裁掉下半部分
         self.fig = Figure(figsize=(6.0, 4.6), dpi=fig_dpi)
         self.axes = self.fig.subplots(2, 2)
+        # Agg 离屏渲染器：matplotlib 在内存中绘制，最终位图交给 PIL/普通画布显示
+        FigureCanvasAgg(self.fig)
         # 固定比例边距（分数制）：任何画布尺寸都按比例缩放、永远生效。
         # 不用 tight_layout —— 高缩放屏幕下其最小边距计算会失败(警告且不排版)，
         # 导致子图/刻度文字挤成一团
         self._apply_fig_margins()
-        # 画布放进“关闭尺寸传播”的容器：TkAgg 部件的期望尺寸 = 图形像素，
-        # 若直接挂在卡片上，重建画布时会把外层卡片/窗口循环撑大（越放大越大）。
-        # pack_propagate(False) 后容器尺寸只由窗口布局决定，画布永远填满容器。
+        # 绘图显示区：普通 tk 画布放在“关闭尺寸传播”的容器中（容器尺寸只由窗口
+        # 布局决定），位图由 _render_plot 离屏渲染后贴入，窗口缩放只会重渲染，
+        # 不存在尺寸反馈回路；该路径与程序 1 显示图像的方式一致
         self._fig_host = tk.Frame(right.inner, bg=self.C_CARD)
         self._fig_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self._fig_host.pack_propagate(False)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_host)
-        self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        # 画布尺寸变化：图形按画布实际像素重设尺寸并防抖重排，子图随窗口缩放始终填满且完整
-        self.canvas.get_tk_widget().bind("<Configure>", self._on_canvas_resize)
+        self._plot_canvas = tk.Canvas(self._fig_host, bg=self.C_CARD,
+                                      highlightthickness=0, bd=0)
+        self._plot_canvas.pack(fill=tk.BOTH, expand=True)
+        self._plot_img = None
+        # 画布尺寸变化：防抖后按新尺寸离屏重渲染
+        self._plot_canvas.bind("<Configure>", self._on_canvas_resize)
 
         # 状态栏（macOS 风格细线分隔）
         tk.Frame(self, bg=self.C_LINE, height=1).pack(side=tk.BOTTOM, fill=tk.X)
@@ -784,7 +792,7 @@ class SpeechGUI(tk.Tk):
 
         self.update_plots()
         # 首次布局完成后重建一次画布：首屏即以真实尺寸渲染，避免初始位图尺寸不匹配
-        self.after(300, self._rebuild_fig_canvas)
+        self.after(300, self._render_plot)
 
     # ------------------------- 面板滚轮滚动 / 绘图区自适应 -------------------------
 
@@ -804,64 +812,47 @@ class SpeechGUI(tk.Tk):
             steps = -2
         self._ctrl_canvas.yview_scroll(steps, "units")
 
+    def _apply_fig_margins(self):
+        """固定比例边距：左/右/上/下与行列间距均为图形分数，
+        任何窗口尺寸下都按比例生效，刻度文字不会互相挤占"""
+        self.fig.subplots_adjust(left=0.10, right=0.985, top=0.90, bottom=0.10,
+                                 wspace=0.24, hspace=0.42)
+
     def _on_canvas_resize(self, e):
-        """画布尺寸变化：图形像素与画布物理像素不一致时，重设图形尺寸并防抖重建画布
-        （重建后 matplotlib 首帧即生成正确尺寸的位图，兼容各版本，杜绝“显示不全/空白”）"""
+        """绘图显示区尺寸变化：防抖后按新尺寸离屏重渲染"""
         if e.width < 40 or e.height < 40:
             return
-        if getattr(self, "_last_fig_px", None) == (e.width, e.height):
+        if getattr(self, "_last_render_px", None) == (e.width, e.height):
             return                       # 同尺寸重复事件直接跳过
-        self._last_fig_px = (e.width, e.height)
-        try:
-            _dpi = self.fig.dpi
-            _w_px = e.width * self._tk_scale   # Tk 单位 → 物理像素
-            _h_px = e.height * self._tk_scale
-            fig_w, fig_h = self.fig.get_size_inches()
-            if abs(fig_w * _dpi - _w_px) < 3 and abs(fig_h * _dpi - _h_px) < 3:
-                return                   # 已等大，无需重建
-            self.fig.set_size_inches(_w_px / _dpi, _h_px / _dpi, forward=False)
-        except Exception:
-            pass
+        self._last_render_px = (e.width, e.height)
         if self._fig_redraw_id:
             try:
                 self.after_cancel(self._fig_redraw_id)
             except Exception:
                 pass
-        self._fig_redraw_id = self.after(180, self._rebuild_fig_canvas)
+        self._fig_redraw_id = self.after(180, self._render_plot)
 
-    def _apply_fig_margins(self):
-        """固定比例边距：左/右/上/下与行列间距均为图形分数，
-        任何窗口尺寸下都按比例生效，刻度文字不会互相挤占"""
-        self.fig.subplots_adjust(left=0.09, right=0.985, top=0.90, bottom=0.09,
-                                 wspace=0.24, hspace=0.42)
-
-    def _rebuild_fig_canvas(self):
-        """重建绘图画布：销毁旧 TkAgg 部件后按当前图形尺寸新建并绑定。
-        新画布装入 _fig_host（已关闭尺寸传播），不会反向撑大外层卡片。"""
+    def _render_plot(self):
+        """离屏渲染 matplotlib 图形并贴到普通画布上：
+        图形像素 = 画布单位 × Tk 缩放系数（物理像素），PIL 转 PhotoImage 后
+        create_image 铺满画布。不依赖 TkAgg 的任何内部机制，各版本稳定。"""
         self._fig_redraw_id = None
         try:
-            old = self.canvas
-            try:
-                old.get_tk_widget().destroy()
-            except Exception:
-                pass
-            self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_host)
-            widget = self.canvas.get_tk_widget()
-            widget.configure(bg=self.C_CARD, highlightthickness=0)
-            widget.pack(fill=tk.BOTH, expand=True)
-            widget.bind("<Configure>", self._on_canvas_resize)
+            w = self._plot_canvas.winfo_width()
+            h = self._plot_canvas.winfo_height()
+            if w <= 4 or h <= 4:
+                return
+            _dpi = self.fig.dpi
+            self.fig.set_size_inches(max(w, 60) * self._tk_scale / _dpi,
+                                     max(h, 60) * self._tk_scale / _dpi, forward=False)
             self._apply_fig_margins()
-            self.canvas.draw()
+            self.fig.canvas.draw()                          # Agg 离屏绘制
+            buf = np.asarray(self.fig.canvas.buffer_rgba())  # RGBA uint8 缓冲
+            self._plot_img = ImageTk.PhotoImage(Image.fromarray(buf, "RGBA"))
+            self._plot_canvas.delete("all")
+            self._plot_canvas.create_image(0, 0, image=self._plot_img, anchor="nw")
         except Exception:
-            pass        # 关窗等场景的残留回调忽略
-
-    def _fig_tight(self):
-        self._fig_redraw_id = None
-        try:
-            self._apply_fig_margins()
-            self.canvas.draw()          # 同步完整重绘，避免部分子图残留未渲染
-        except Exception:
-            pass        # 窗口关闭等场景下的残留回调，忽略即可
+            pass        # 窗口关闭等场景下的残留回调忽略
 
     # ------------------------- 语音采集 -------------------------
 
@@ -1133,7 +1124,7 @@ class SpeechGUI(tk.Tk):
             ax.xaxis.label.set_fontsize(8.5)
             ax.yaxis.label.set_fontsize(8.5)
         if self.original is None:
-            self.canvas.draw_idle()
+            self._render_plot()
             return
         t = np.arange(len(self.original)) / self.fs
         # 2x2 子图布局：上行 = 原始/加噪波形，下行 = 去噪波形/FFT 频谱对比
@@ -1172,7 +1163,7 @@ class SpeechGUI(tk.Tk):
         ax4.legend(loc="upper right", fontsize=7.5, frameon=False, handlelength=1.6)
 
         self._apply_fig_margins()   # 固定比例边距排版（任何尺寸稳定生效）
-        self.canvas.draw()      # 强制完整重绘，保证全屏/缩放后全部子图渲染完整
+        self._render_plot()     # 离屏渲染并贴图（任何尺寸、DPI 稳定）
         self._update_metrics()
 
     def _update_metrics(self):
