@@ -539,7 +539,7 @@ class SpeechGUI(tk.Tk):
         self._rec_until = 0.0       # 本段采集的结束时刻（time.time()）
         self._rec_var = tk.StringVar(value="采集空闲")   # ①卡片内采集状态提示（倒计时）
         self.status_var = tk.StringVar(
-            value="【渲染引擎 v11-PIL】请先【生成测试音频】/【开始采集】/【打开音频】")
+            value="【渲染引擎 v12-PIL】请先【生成测试音频】/【开始采集】/【打开音频】")
 
         self._build_ui()
 
@@ -756,15 +756,26 @@ class SpeechGUI(tk.Tk):
         # 导致子图/刻度文字挤成一团
         self._apply_fig_margins()
         # 绘图显示区：普通 tk 画布放在“关闭尺寸传播”的容器中（容器尺寸只由窗口
-        # 布局决定），位图由 _render_plot 离屏渲染后贴入，窗口缩放只会重渲染，
-        # 不存在尺寸反馈回路；该路径与程序 1 显示图像的方式一致
+        # 布局决定），位图由 _render_plot 离屏渲染后贴入；窗口过矮时图形保持
+        # 最小渲染高度，右侧竖向滑动条滚动查看，不再被压缩变形
         self._fig_host = tk.Frame(right.inner, bg=self.C_CARD)
         self._fig_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self._fig_host.pack_propagate(False)
+        self._plot_scroll = tk.Scrollbar(self._fig_host, orient=tk.VERTICAL, width=10,
+                                         bg="#D9D9E0", troughcolor=self.C_CARD, bd=0,
+                                         highlightthickness=0, activebackground=self.C_SUB)
         self._plot_canvas = tk.Canvas(self._fig_host, bg=self.C_CARD,
-                                      highlightthickness=0, bd=0)
-        self._plot_canvas.pack(fill=tk.BOTH, expand=True)
+                                      highlightthickness=0, bd=0,
+                                      yscrollcommand=self._plot_scroll.set)
+        self._plot_scroll.config(command=self._plot_canvas.yview)
+        self._plot_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._plot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._plot_img = None
+        self._plot_min_h = 680   # 图形最小渲染高度（物理像素，窗口更矮时滚动查看）
+        # 悬停绘图区滚轮即可上下滚动图形
+        self._plot_canvas.bind("<MouseWheel>", self._on_plot_wheel)
+        self._plot_canvas.bind("<Button-4>", self._on_plot_wheel)
+        self._plot_canvas.bind("<Button-5>", self._on_plot_wheel)
         # 画布尺寸变化：防抖后按新尺寸离屏重渲染
         self._plot_canvas.bind("<Configure>", self._on_canvas_resize)
 
@@ -832,10 +843,21 @@ class SpeechGUI(tk.Tk):
                 pass
         self._fig_redraw_id = self.after(180, self._render_plot)
 
+    def _on_plot_wheel(self, e):
+        """滚轮滚动右侧图形（窗口过矮、图形超出可视区时）"""
+        if getattr(e, "num", None) == 4 or getattr(e, "delta", 0) > 0:
+            steps = -2
+        else:
+            steps = 2
+        try:
+            self._plot_canvas.yview_scroll(steps, "units")
+        except Exception:
+            pass
+
     def _render_plot(self):
         """离屏渲染 matplotlib 图形并贴到普通画布上：
-        图形像素 = 画布单位 × Tk 缩放系数（物理像素），PIL 转 PhotoImage 后
-        create_image 铺满画布。不依赖 TkAgg 的任何内部机制，各版本稳定。"""
+        图形像素 = 画布单位 × Tk 缩放系数（物理像素），高度低于最小渲染高度时
+        保持最小高度并由竖向滑动条滚动查看；不依赖 TkAgg 任何内部机制。"""
         self._fig_redraw_id = None
         try:
             w = self._plot_canvas.winfo_width()
@@ -843,16 +865,36 @@ class SpeechGUI(tk.Tk):
             if w <= 4 or h <= 4:
                 return
             _dpi = self.fig.dpi
-            self.fig.set_size_inches(max(w, 60) * self._tk_scale / _dpi,
-                                     max(h, 60) * self._tk_scale / _dpi, forward=False)
+            _w = max(w, 60) * self._tk_scale                    # 物理像素
+            _h = max(h, 60) * self._tk_scale
+            _h = max(_h, self._plot_min_h)      # 最小渲染高度，保证子图/文字不被压扁
+            self.fig.set_size_inches(_w / _dpi, _h / _dpi, forward=False)
             self._apply_fig_margins()
             self.fig.canvas.draw()                          # Agg 离屏绘制
             buf = np.asarray(self.fig.canvas.buffer_rgba())  # RGBA uint8 缓冲
             self._plot_img = ImageTk.PhotoImage(Image.fromarray(buf, "RGBA"))
             self._plot_canvas.delete("all")
             self._plot_canvas.create_image(0, 0, image=self._plot_img, anchor="nw")
+            # 滚动范围 = 位图实际像素高度（超出可视区时可滚动）
+            self._plot_canvas.configure(scrollregion=(0, 0, int(_w), int(_h)))
+            if self.original is None:
+                self._draw_plot_hint(int(_w), int(_h))   # 空数据引导（重渲染后补画）
         except Exception:
             pass        # 窗口关闭等场景下的残留回调忽略
+
+    def _draw_plot_hint(self, img_w, img_h):
+        """空数据时在图形可视区中央显示操作引导，避免空白显得像故障
+        （坐标使用画布像素坐标，与贴图一致）"""
+        try:
+            cv_h = self._plot_canvas.winfo_height() * self._tk_scale  # 可视高度(px)
+            cx = img_w // 2
+            cy = int(min(img_h, cv_h)) // 2
+            self._plot_canvas.create_text(
+                cx, cy,
+                text="暂无信号数据\n请先【生成测试音频】/【开始采集】/【打开音频文件】",
+                fill=self.C_SUB, font=self.F(11), justify=tk.CENTER, tags="hint")
+        except Exception:
+            pass
 
     # ------------------------- 语音采集 -------------------------
 
@@ -1124,7 +1166,7 @@ class SpeechGUI(tk.Tk):
             ax.xaxis.label.set_fontsize(8.5)
             ax.yaxis.label.set_fontsize(8.5)
         if self.original is None:
-            self._render_plot()
+            self._render_plot()     # 空数据：渲染空图 + 中央引导提示
             return
         t = np.arange(len(self.original)) / self.fs
         # 2x2 子图布局：上行 = 原始/加噪波形，下行 = 去噪波形/FFT 频谱对比
