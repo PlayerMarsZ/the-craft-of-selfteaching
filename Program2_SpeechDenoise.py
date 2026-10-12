@@ -748,10 +748,15 @@ class SpeechGUI(tk.Tk):
         # 不用 tight_layout —— 高缩放屏幕下其最小边距计算会失败(警告且不排版)，
         # 导致子图/刻度文字挤成一团
         self._apply_fig_margins()
-        self.canvas = FigureCanvasTkAgg(self.fig, master=right.inner)
-        self._fig_master = right.inner          # 画布重建时的父容器
+        # 画布放进“关闭尺寸传播”的容器：TkAgg 部件的期望尺寸 = 图形像素，
+        # 若直接挂在卡片上，重建画布时会把外层卡片/窗口循环撑大（越放大越大）。
+        # pack_propagate(False) 后容器尺寸只由窗口布局决定，画布永远填满容器。
+        self._fig_host = tk.Frame(right.inner, bg=self.C_CARD)
+        self._fig_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._fig_host.pack_propagate(False)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_host)
         self.canvas.get_tk_widget().configure(bg=self.C_CARD, highlightthickness=0)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         # 画布尺寸变化：图形按画布实际像素重设尺寸并防抖重排，子图随窗口缩放始终填满且完整
         self.canvas.get_tk_widget().bind("<Configure>", self._on_canvas_resize)
 
@@ -832,7 +837,7 @@ class SpeechGUI(tk.Tk):
 
     def _rebuild_fig_canvas(self):
         """重建绘图画布：销毁旧 TkAgg 部件后按当前图形尺寸新建并绑定。
-        对比手动重建 PhotoImage，此方式在任何 matplotlib 版本下都稳定。"""
+        新画布装入 _fig_host（已关闭尺寸传播），不会反向撑大外层卡片。"""
         self._fig_redraw_id = None
         try:
             old = self.canvas
@@ -840,10 +845,10 @@ class SpeechGUI(tk.Tk):
                 old.get_tk_widget().destroy()
             except Exception:
                 pass
-            self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_master)
+            self.canvas = FigureCanvasTkAgg(self.fig, master=self._fig_host)
             widget = self.canvas.get_tk_widget()
             widget.configure(bg=self.C_CARD, highlightthickness=0)
-            widget.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+            widget.pack(fill=tk.BOTH, expand=True)
             widget.bind("<Configure>", self._on_canvas_resize)
             self._apply_fig_margins()
             self.canvas.draw()
