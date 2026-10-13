@@ -539,7 +539,7 @@ class SpeechGUI(tk.Tk):
         self._rec_until = 0.0       # 本段采集的结束时刻（time.time()）
         self._rec_var = tk.StringVar(value="采集空闲")   # ①卡片内采集状态提示（倒计时）
         self.status_var = tk.StringVar(
-            value="【渲染引擎 v12-PIL】请先【生成测试音频】/【开始采集】/【打开音频】")
+            value="【渲染引擎 v14-PIL】请先【生成测试音频】/【开始采集】/【打开音频】")
 
         self._build_ui()
 
@@ -761,8 +761,8 @@ class SpeechGUI(tk.Tk):
         self._fig_host = tk.Frame(right.inner, bg=self.C_CARD)
         self._fig_host.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self._fig_host.pack_propagate(False)
-        self._plot_scroll = tk.Scrollbar(self._fig_host, orient=tk.VERTICAL, width=10,
-                                         bg="#D9D9E0", troughcolor=self.C_CARD, bd=0,
+        self._plot_scroll = tk.Scrollbar(self._fig_host, orient=tk.VERTICAL, width=14,
+                                         bg="#C9C9D4", troughcolor=self.C_CARD, bd=0,
                                          highlightthickness=0, activebackground=self.C_SUB)
         self._plot_canvas = tk.Canvas(self._fig_host, bg=self.C_CARD,
                                       highlightthickness=0, bd=0,
@@ -854,10 +854,15 @@ class SpeechGUI(tk.Tk):
         except Exception:
             pass
 
-    def _render_plot(self):
-        """离屏渲染 matplotlib 图形并贴到普通画布上：
-        图形像素 = 画布单位 × Tk 缩放系数（物理像素），高度低于最小渲染高度时
-        保持最小高度并由竖向滑动条滚动查看；不依赖 TkAgg 任何内部机制。"""
+    def _render_plot(self, px_w=None, px_h=None):
+        """离屏渲染 matplotlib 图形并贴到普通画布上，铺满可视区。
+
+        尺寸采用“运行时自校准”：先按估算尺寸渲染，再把画布滚动区临时放大为
+        探测区，用 xview/yview 返回的可视比例反推出可视区真实物理像素；若与
+        渲染尺寸偏差超过 4px，则以实测值重渲染一次（最多 2 次）。该闭环不依赖
+        任何 DPI/缩放估算，在任意高分屏、任意 matplotlib/Tk 版本下都会收敛到
+        图形与可视区像素级等大。窗口过矮时图形保持最小渲染高度，由右侧竖向
+        滑动条滚动查看。"""
         self._fig_redraw_id = None
         try:
             w = self._plot_canvas.winfo_width()
@@ -865,32 +870,58 @@ class SpeechGUI(tk.Tk):
             if w <= 4 or h <= 4:
                 return
             _dpi = self.fig.dpi
-            _w = max(w, 60) * self._tk_scale                    # 物理像素
-            _h = max(h, 60) * self._tk_scale
-            _h = max(_h, self._plot_min_h)      # 最小渲染高度，保证子图/文字不被压扁
-            self.fig.set_size_inches(_w / _dpi, _h / _dpi, forward=False)
+            if px_w is None:                # 初始估算：画布单位经 winfo_pixels 换算
+                px_w = int(self._plot_canvas.winfo_pixels(w))
+            if px_h is None:
+                px_h = int(self._plot_canvas.winfo_pixels(h))
+            if px_w <= 0 or px_h <= 0:
+                px_w, px_h = int(w * self._tk_scale), int(h * self._tk_scale)
+            px_w = max(px_w, 60); px_h = max(px_h, 60)
+            px_h = max(px_h, self._plot_min_h)   # 最小渲染高度，子图/文字不被压扁
+
+            self.fig.set_size_inches(px_w / _dpi, px_h / _dpi, forward=False)
             self._apply_fig_margins()
             self.fig.canvas.draw()                          # Agg 离屏绘制
             buf = np.asarray(self.fig.canvas.buffer_rgba())  # RGBA uint8 缓冲
             self._plot_img = ImageTk.PhotoImage(Image.fromarray(buf, "RGBA"))
             self._plot_canvas.delete("all")
             self._plot_canvas.create_image(0, 0, image=self._plot_img, anchor="nw")
-            # 滚动范围 = 位图实际像素高度（超出可视区时可滚动）
-            self._plot_canvas.configure(scrollregion=(0, 0, int(_w), int(_h)))
+
+            # ---- 可视区真实像素探测/自校准 ----
+            probe_w = max(px_w, 9000)     # 探测区必须大于可视区才能得到 <1 的比例
+            probe_h = max(px_h, 9000)
+            self._plot_canvas.configure(scrollregion=(0, 0, probe_w, probe_h))
+            xf = self._plot_canvas.xview()
+            yf = self._plot_canvas.yview()
+            vis_w = (xf[1] - xf[0]) * probe_w
+            vis_h = (yf[1] - yf[0]) * probe_h
+            self._plot_canvas.configure(scrollregion=(0, 0, px_w, px_h))
+            self._vis_px = (vis_w, vis_h)   # 实测可视区物理像素（提示文字定位用）
+
+            cnt = getattr(self, "_cal_cnt", 0)
+            # 高度被最小渲染高度钳制（滚动查看模式）时，高度差属预期，不触发重渲染
+            _h_clamped = px_h == self._plot_min_h and vis_h <= px_h
+            if (abs(vis_w - px_w) > 4 or (abs(vis_h - px_h) > 4 and not _h_clamped)) \
+                    and cnt < 2 and vis_w >= 160:
+                self._cal_cnt = cnt + 1
+                print("渲染自校准: 估算=%dx%dpx 可视区实测=%dx%dpx → 重新渲染"
+                      % (px_w, px_h, int(vis_w), int(vis_h)))
+                self._render_plot(px_w=int(vis_w),
+                                  px_h=int(max(vis_h, self._plot_min_h)))
+                return
+            self._cal_cnt = 0
+
             if self.original is None:
-                self._draw_plot_hint(int(_w), int(_h))   # 空数据引导（重渲染后补画）
+                self._draw_plot_hint()   # 空数据引导（置于可视区中央）
         except Exception:
             pass        # 窗口关闭等场景下的残留回调忽略
 
-    def _draw_plot_hint(self, img_w, img_h):
-        """空数据时在图形可视区中央显示操作引导，避免空白显得像故障
-        （坐标使用画布像素坐标，与贴图一致）"""
+    def _draw_plot_hint(self):
+        """空数据时在图形可视区中央显示操作引导，避免空白显得像故障"""
         try:
-            cv_h = self._plot_canvas.winfo_height() * self._tk_scale  # 可视高度(px)
-            cx = img_w // 2
-            cy = int(min(img_h, cv_h)) // 2
+            vis_w, vis_h = getattr(self, "_vis_px", (200, 200))
             self._plot_canvas.create_text(
-                cx, cy,
+                vis_w / 2, vis_h / 2,
                 text="暂无信号数据\n请先【生成测试音频】/【开始采集】/【打开音频文件】",
                 fill=self.C_SUB, font=self.F(11), justify=tk.CENTER, tags="hint")
         except Exception:
