@@ -334,6 +334,15 @@ class TrafficGUI(tk.Tk):
         self.status_var = tk.StringVar(value="请点击【打开视频】选择交通监控视频文件")
         self.info_var = tk.StringVar(value="帧: 0/0   帧率: -- fps   速度: 1x")
 
+        # -------- 车辆检测/计数状态 --------
+        self.detect_on = False      # 检测开关
+        self._bg = None             # MOG2 背景建模器（开启检测时创建）
+        self._bg_vt = -1            # 建模器对应的灵敏度参数（变化时重建）
+        self.tracks = {}            # 跟踪目标 {id: {c:(x,y), last:(x,y), counted, box}}
+        self._next_id = 0
+        self.total_count = 0        # 跨过虚拟检测线的车辆总数
+        self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
+
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -412,6 +421,24 @@ class TrafficGUI(tk.Tk):
         tk.Label(bar, textvariable=self.status_var, anchor="e", bg=self.GLASS,
                  fg=self.C_OK, font=self.F(9)).pack(side=tk.RIGHT, padx=12)
 
+        # 检测控制行（车辆检测 + 清空计数 + 灵敏度滑块 + 实时统计）
+        bar2 = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
+        bar2.pack(side=tk.BOTTOM, fill=tk.X)
+        self.btn_detect = self._btn(bar2, "车辆检测: 关", self.toggle_detect)
+        self.btn_detect.pack(side=tk.LEFT, padx=(14, 5), pady=6)
+        self._btn(bar2, "清空计数", self.reset_count).pack(side=tk.LEFT, padx=5, pady=6)
+
+        self._lab(bar2, "检测灵敏度", size=9).pack(side=tk.LEFT, padx=(16, 0))
+        self.sens_var = tk.DoubleVar(value=24.0)   # MOG2 varThreshold（越小越敏感）
+        FlatSlider(bar2, variable=self.sens_var, from_=8.0, to=64.0, resolution=1.0,
+                   length=140, font=self.F(9, eng=True)
+                   ).pack(side=tk.LEFT, padx=8, pady=8)
+
+        self.count_var = tk.StringVar(value="车辆总数: 0    当前目标: 0")
+        tk.Label(bar2, textvariable=self.count_var, anchor="e", bg=self.GLASS,
+                 fg=self.C_ACCENT, font=self.F(10, True)
+                 ).pack(side=tk.RIGHT, padx=14)
+
     # ------------------------- 视频开关 -------------------------
 
     def open_video(self, path=None):
@@ -444,6 +471,13 @@ class TrafficGUI(tk.Tk):
             self._show_frame(frame)
         self.btn_play.config(text="▶ 播放")
         self._update_info()
+        # 新视频：清空检测统计（背景模型与跟踪目标一并重置）
+        self.tracks = {}
+        self.total_count = 0
+        self._line_y = None
+        self._bg = None
+        self._bg_vt = -1
+        self.count_var.set("车辆总数: 0    当前目标: 0")
         return True
 
     # ------------------------- 播放控制 -------------------------
@@ -491,6 +525,150 @@ class TrafficGUI(tk.Tk):
         self.speed_var.set(0.5)
         self.status_var.set("速度设为 0.5x（慢放）")
 
+    # ------------------------- 车辆检测 / 计数 -------------------------
+
+    def toggle_detect(self):
+        """开启/关闭车辆检测。算法（无需深度学习权重，纯 OpenCV 即可运行）：
+        ① MOG2 动态背景建模提取运动前景（对路灯光影/树叶抖动自适应）；
+        ② 阈值直方截断抑制阴影（MOG2 阴影标记=127，直接滤除）；
+        ③ 形态学开运算去噪点 + 闭运算补车辆空洞；
+        ④ 面积/长宽比约束过滤行人、路噪，IoU 合并同一辆车的碎片框；
+        ⑤ 质心 EMA 平滑 + 最近邻多目标跟踪（每辆车唯一 ID，不会重复计数）；
+        ⑥ 虚拟检测线绊线计数：车辆质心跨过画面 60% 高度线时计数并记录方向。"""
+        if self.cap is None:
+            messagebox.showwarning("提示", "请先打开视频文件")
+            return
+        self.detect_on = not self.detect_on
+        if self.detect_on:
+            self.btn_detect.config(text="车辆检测: 开")
+            self.status_var.set("车辆检测已开启：跨线计数（可调灵敏度）")
+        else:
+            self.btn_detect.config(text="车辆检测: 关")
+            self.status_var.set("车辆检测已关闭")
+
+    def reset_count(self):
+        """清空车辆计数与当前跟踪目标"""
+        self.total_count = 0
+        self.tracks = {}
+        self.count_var.set("车辆总数: 0    当前目标: 0")
+        self.status_var.set("计数已清零")
+
+    def _merge_boxes(self, boxes):
+        """重叠/包含框合并：消除同一辆车前后轮区域被拆成多个检测的问题"""
+        changed = True
+        while changed and len(boxes) > 1:
+            changed = False
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    x1, y1, w1, h1 = boxes[i]
+                    x2, y2, w2, h2 = boxes[j]
+                    ix = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+                    iy = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+                    inter = ix * iy
+                    if inter > 0.35 * min(w1 * h1, w2 * h2):
+                        ux = min(x1, x2); uy = min(y1, y2)
+                        uw = max(x1 + w1, x2 + w2) - ux
+                        uh = max(y1 + h1, y2 + h2) - uy
+                        boxes[i] = [ux, uy, uw, uh]
+                        boxes.pop(j)
+                        changed = True
+                        break
+                if changed:
+                    break
+        return boxes
+
+    def _detect(self, bgr):
+        """对一帧做车辆检测+跟踪+绊线计数，返回叠加了标注的 BGR 帧。
+        全程仅用 numpy/cv2 经典方法，速度快、依赖少（创新点见 toggle_detect）。"""
+        h, w = bgr.shape[:2]
+        if self._line_y is None:
+            self._line_y = int(h * 0.6)          # 虚拟检测线：画面 60% 高度处
+        vt = int(self.sens_var.get())
+        if self._bg is None or vt != self._bg_vt:
+            # 灵敏度滑块变化 → 重建背景模型，参数即时生效
+            self._bg = cv2.createBackgroundSubtractorMOG2(
+                history=400, varThreshold=vt, detectShadows=True)
+            self._bg_vt = vt
+        fg = self._bg.apply(bgr)
+        # 阴影抑制：MOG2 的阴影标记为 127，阈值截断后只保留真实前景
+        _, fg = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE,
+                              cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        boxes = []
+        min_area = max(120, int(w * h * 0.0004))
+        for c in cnts:
+            x, y, bw, bh = cv2.boundingRect(c)
+            if bw * bh < min_area:
+                continue
+            ar = bw / max(bh, 1)
+            if not (0.3 <= ar <= 4.0):       # 车辆宽扁结构，过滤行人/细长噪声
+                continue
+            boxes.append([x, y, bw, bh])
+        boxes = self._merge_boxes(boxes)
+
+        # ---- 质心最近邻跟踪 + EMA 平滑 ----
+        cents = [(x + bw / 2.0, y + bh / 2.0) for (x, y, bw, bh) in boxes]
+        used = [False] * len(cents)
+        for tid, t in self.tracks.items():
+            best, bd = None, 1e9
+            for i, c in enumerate(cents):
+                if used[i]:
+                    continue
+                d = (c[0] - t["c"][0]) ** 2 + (c[1] - t["c"][1]) ** 2
+                if d < bd:
+                    bd, best = d, i
+            if best is not None and bd <= 70.0 ** 2:
+                used[best] = True
+                nc = cents[best]
+                t["last"], t["c"] = t["c"], t["c"]      # 旧质心记为上一帧位置
+                t["c"] = (0.72 * nc[0] + 0.28 * t["c"][0],
+                          0.72 * nc[1] + 0.28 * t["c"][1])   # EMA 平滑防抖动
+                t["box"] = boxes[best]
+                t["lost"] = 0
+                # 虚拟检测线绊线计数（带方向，跨线只计一次）
+                if not t["counted"]:
+                    prev_y, cur_y = t["last"][1], t["c"][1]
+                    if (prev_y - self._line_y) * (cur_y - self._line_y) < 0 or \
+                            (prev_y != self._line_y and cur_y == self._line_y):
+                        t["counted"] = True
+                        self.total_count += 1
+                        self.status_var.set("检测到车辆驶过检测线（总数 %d）"
+                                            % self.total_count)
+            else:
+                t["lost"] += 1
+        self.tracks = {tid: t for tid, t in self.tracks.items() if t["lost"] <= 4}
+        for i, c in enumerate(cents):
+            if not used[i]:                # 新出现目标 → 分配唯一 ID
+                self.tracks[self._next_id] = {"c": c, "last": c, "box": boxes[i],
+                                              "counted": False, "lost": 0}
+                self._next_id += 1
+
+        # ---- 结果叠加到画面（GUI 内直接可见）----
+        out = bgr
+        cv2.line(out, (0, self._line_y), (w, self._line_y), (0, 200, 255), 2)
+        for tid, t in self.tracks.items():
+            if t["lost"] > 0 and t["box"] is None:
+                continue
+            x, y, bw, bh = t["box"]
+            color = (46, 199, 85) if t["counted"] else (0, 150, 255)  # 绿=已计数 橙=未过线
+            cv2.rectangle(out, (x, y), (x + bw, y + bh), color, 2)
+            cv2.circle(out, (int(t["c"][0]), int(t["c"][1])), 4, color, -1)
+            cv2.putText(out, "ID %d" % tid, (x, max(38, y - 6)),   # 38=顶部统计条下方，避免被遮挡
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
+        cv2.rectangle(out, (0, 0), (w, 34), (28, 30, 40), -1)
+        cv2.putText(out, "TOTAL: %d   TRACKING: %d   LINE" %
+                    (self.total_count, len(self.tracks)),
+                    (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+                    cv2.LINE_AA)
+        self.count_var.set("车辆总数: %d    当前目标: %d" %
+                           (self.total_count, len(self.tracks)))
+        return out
+
+    # ------------------------- 播放主循环 -------------------------
+
     def _tick(self):
         """播放主循环：按帧率/速度调度下一帧"""
         if not self.playing or self.cap is None:
@@ -508,6 +686,8 @@ class TrafficGUI(tk.Tk):
                 return
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
+        if self.detect_on:
+            frame = self._detect(frame)     # 车辆检测 + 计数标注（结果直接叠加显示）
         self._show_frame(frame)
         # 播放速度越快，帧间隔越短（快进）；越慢，帧间隔越长（慢放）
         delay = max(1, int(round(1000.0 / max(self.fps, 1.0) / self.speed_var.get())))
@@ -525,7 +705,7 @@ class TrafficGUI(tk.Tk):
         r = min(cw / pil.width, ch / pil.height)     # 等比缩放比例，画面不变形
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
-        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS))
+        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS), master=self.canvas)
         self.canvas.delete("all")
         # 圆角显示底色：画布本身与卡片同色，圆角外露区域融入卡片背景
         round_rect(self.canvas, 1, 1, cw, ch, 16, fill=self.C_CANVAS, outline="")
