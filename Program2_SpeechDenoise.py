@@ -883,7 +883,7 @@ class SpeechGUI(tk.Tk):
             self._apply_fig_margins()
             self.fig.canvas.draw()                          # Agg 离屏绘制
             buf = np.asarray(self.fig.canvas.buffer_rgba())  # RGBA uint8 缓冲
-            self._plot_img = ImageTk.PhotoImage(Image.fromarray(buf, "RGBA"))
+            self._plot_img = ImageTk.PhotoImage(Image.fromarray(buf).convert("RGBA"))
             self._plot_canvas.delete("all")
             self._plot_canvas.create_image(0, 0, image=self._plot_img, anchor="nw")
 
