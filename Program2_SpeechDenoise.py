@@ -1103,11 +1103,11 @@ class SpeechGUI(tk.Tk):
             return
         try:
             speed = max(0.25, min(2.0, speed))   # 速度限幅在 0.25~2.0 之间（快进/慢放均有上限）
-            if speed >= 1:                       # 快进：按整数倍抽点播放，时长缩短
-                step = int(round(speed))
-                y = x[::step] if step > 1 else x
-            else:                                # 慢放：插值重采样拉长信号，时长增加
-                y = resample(x, int(len(x) / speed))
+            # 任意倍速统一用重采样实现（原抽点法只能做整数倍，1.25x/1.5x/1.75x
+            # 等中间挡位会被四舍五入成 1x/2x，等于失效）：
+            # 输出点数 = 原长度/速度 → 播放时长 = 原时长/速度，快进慢放所有挡位均生效
+            n = max(16, int(len(x) / speed))
+            y = x if abs(speed - 1.0) < 1e-6 else resample(x, n)
             sd.stop()                            # 先停掉上一段声音，避免与本次播放重叠
             sd.play(y.astype(np.float32), self.fs)
             self.status_var.set("正在播放（%.2fx）…" % speed)
