@@ -469,18 +469,13 @@ def wavelet_denoise(x, level=3, thr_mult=0.8, wavelet="db4"):
 
 
 def fft_spectrum(x, fs):
-    """FFT 单边幅度谱：返回频率轴 (Hz) 与幅度 (dB，峰值归一化)。
-    幅度 = 20*log10(|X|/|X|max)：最大频率分量为 0 dB，其余为该分量的相对值。
-    幅值小于峰值时 dB 为负属正常物理结果；下限截断 -120 dB，避免噪声频段
-    出现无意义的深负长尾。"""
+    """FFT 单边幅度谱：返回频率轴 (Hz) 与归一化线性幅度（0~1，非负）。
+    幅度 = |X| / |X|max：最大频率分量为 1.0，其余为相对比例。
+    使用线性幅度（不用 dB），纵轴恒为非负数，直观对应频谱大小。"""
     X = np.fft.rfft(x)
     A = np.abs(X)
     amax = np.max(A)
-    if amax > 0:
-        mag = 20.0 * np.log10(A / amax + 1e-12)
-    else:                                     # 全零信号（理论上不会出现）
-        mag = np.zeros_like(A)
-    mag = np.maximum(mag, -120.0)
+    mag = A / amax if amax > 0 else np.zeros_like(A)
     f = np.fft.rfftfreq(len(x), d=1.0 / fs)
     return f, mag
 
@@ -1239,10 +1234,10 @@ class SpeechGUI(tk.Tk):
         if self.denoised is not None:
             f3, mag3 = fft_spectrum(self.denoised, self.fs)
             ax4.plot(f3, mag3, lw=0.6, color="#2ca02c", alpha=0.9, label="去噪后")
-        ax4.set_title("幅度谱对比（dB, 峰值归一化）")
+        ax4.set_title("幅度谱对比（归一化线性）")
         ax4.set_xlabel("频率(Hz)")
-        ax4.set_ylabel("幅度(dB)")
-        ax4.set_ylim(-120, 5)      # 显示范围固定：0dB=最大分量，负值为相对衰减
+        ax4.set_ylabel("归一化幅度")
+        ax4.set_ylim(0, 1.05)   # 固定 0~1：非负幅度谱，最大值=1
         ax4.legend(loc="upper right", fontsize=7.5, frameon=False, handlelength=1.6)
 
         self._apply_fig_margins()   # 固定比例边距排版（任何尺寸稳定生效）
