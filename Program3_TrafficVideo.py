@@ -345,8 +345,8 @@ class TrafficGUI(tk.Tk):
         self.fps = 25.0            # 视频帧率
         self.playing = False       # 播放状态
         self.after_id = None       # 定时器句柄
-        self.status_var = tk.StringVar(value="请点击【打开视频】选择交通监控视频文件")
-        self.info_var = tk.StringVar(value="帧: 0/0   帧率: -- fps   速度: 1x")
+        self.status_var = tk.StringVar(value="【引擎 v3.2】请点击【打开视频】选择交通监控视频文件")
+        self.info_var = tk.StringVar(value="已读帧: 0   元数据总帧: --   帧率: -- fps   速度: 1x")
 
         # -------- 车辆检测/计数状态 --------
         self.detect_on = False      # 检测开关
@@ -521,7 +521,9 @@ class TrafficGUI(tk.Tk):
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.fps = fps if 0 < fps <= 240 else 25.0     # 异常帧率兜底
         name = path.replace("\\", "/").split("/")[-1]
-        self.status_var.set("已打开视频：%s" % name)
+        meta_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.status_var.set("已打开：%s（元数据 %d 帧 @ %.0f fps，播放中将自动实测校正）"
+                            % (name, meta_frames, self.fps))
         ok, frame = self.cap.read()
         if ok:
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)   # 回到第一帧
@@ -969,8 +971,10 @@ class TrafficGUI(tk.Tk):
                 self.playing = False
                 self.btn_play.config(text="▶ 播放")
                 pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-                total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                self.status_var.set("播放结束（第 %d / %d 帧）" % (pos, total))
+                meta = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                note = ("，元数据 %d 帧不准（以实际为准）" % meta
+                        if abs(pos - meta) > 3 else "，全长 %d 帧" % meta)
+                self.status_var.set("播放结束：实际读到 %d 帧%s" % (pos, note))
                 return
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
@@ -1067,10 +1071,12 @@ class TrafficGUI(tk.Tk):
         if self.cap is None:
             return
         pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-        total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.info_var.set("帧: %d/%d   帧率: %.0f fps(%s)   速度: %.2fx" %
-                          (pos, total, self._eff_fps(), self._fps_tag(),
-                           self.speed_var.get()))
+        # 元数据总帧数不可靠（常见误报为极小值，界面会出现"固定12帧"），
+        # 以"已读帧数 + 元数据帧数"并列显示，绝不只依赖元数据
+        meta = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self.info_var.set("已读帧: %d   元数据总帧: %d   帧率: %.0f fps(%s)   速度: %.2fx"
+                          % (pos, meta, self._eff_fps(), self._fps_tag(),
+                             self.speed_var.get()))
 
     def on_close(self):
         """窗口关闭时释放视频资源"""
