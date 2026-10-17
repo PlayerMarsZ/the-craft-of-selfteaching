@@ -1031,34 +1031,42 @@ class TrafficGUI(tk.Tk):
 
     def _fps_tag(self):
         """信息栏里的帧率来源标注"""
-        return "手动" if self._fps_manual else ("实测" if self._fps_est else "视频")
+        if self._fps_manual:
+            return "手动"
+        if self._fps_est is not None and abs(self._fps_est - self.fps) > 2.0:
+            return "实测"     # 实测推翻了元数据
+        return "视频"
 
     def _calibrate_fps(self):
-        """用相邻帧时间戳自动实测真实帧率。
-        很多视频的容器元数据不可靠（如 30fps 被报成 12），实测值才真实反映
-        播放节奏；连续 6 帧时间戳中位数估算，抗 VFR 抖动。"""
+        """用帧时间戳窗口的端点斜率自动实测真实帧率。
+        不能取"相邻间隔中位数"：部分视频容器的时间戳按 1/12s 时间基量化
+        （全部戳都是 83ms 整数倍），中位数恒为 83ms → 会误测成 12fps。
+        端点斜率在 N 帧窗口上做平均，量化误差被摊平（如 12 帧戳前进 1000ms，
+        斜率仍准确还原 30fps）。"""
         if self._fps_manual is not None:
             return
         try:
             self._ms_hist.append(float(self.cap.get(cv2.CAP_PROP_POS_MSEC)))
         except Exception:
             return
-        self._ms_hist = self._ms_hist[-8:]
-        if len(self._ms_hist) < 6:
+        self._ms_hist = self._ms_hist[-40:]          # 约 1.3s 窗口：足够长以摊平时间戳量化台阶
+        if len(self._ms_hist) < 20:
             return
-        d = np.diff(np.asarray(self._ms_hist, float))
-        d = d[(d > 0) & (d < 2000)]        # 排除跳转/回绕的异常间隔
-        if len(d) < 4:
+        d_total = self._ms_hist[-1] - self._ms_hist[0]
+        if d_total <= 0:
             return
-        est = 1000.0 / float(np.median(d))     # 间隔中位数 → 帧率
-        if not (1.0 <= est <= 240):
+        est = 1000.0 * (len(self._ms_hist) - 1) / d_total     # 窗口端点斜率 → fps
+        if not (1.0 <= est <= 240.0):
             return
-        if self._fps_est is None or abs(est - self._fps_est) > 1.0:
-            first = self._fps_est is None
-            self._fps_est = round(est, 1)
-            if first or abs(est - self.fps) > 2.0:
-                self.status_var.set("已按实测时间戳校准帧率：%.0f fps（元数据 %.0f）"
+        if abs(est - self.fps) <= 8.0:
+            # 实测与元数据一致（含时间戳量化引入的 <20% 偏差）→ 采用更稳的元数据
+            self._fps_est = self.fps
+        else:
+            # 差异巨大：元数据明显不可信（如 30fps 视频被报成 12），采用实测值
+            if self._fps_est is None:
+                self.status_var.set("已按实测时间戳校准帧率：%.0f fps（元数据 %.0f，差异过大）"
                                     % (est, self.fps))
+            self._fps_est = round(est, 1)
 
     def apply_fps_override(self, _e=None):
         """播放帧率选择器：视频元数据误报时手动指定真实帧率"""
