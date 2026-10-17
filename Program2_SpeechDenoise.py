@@ -681,7 +681,7 @@ class SpeechGUI(tk.Tk):
         row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11, pady=(6, 0))
         self._radio(row, "高斯白噪声", self.noise_type, 0).pack(side=tk.LEFT)
         self._lab(row, "SNR(dB)", size=9).pack(side=tk.LEFT, padx=(6, 0))
-        self.snr_var = tk.DoubleVar(value=10.0)
+        self.snr_var = tk.DoubleVar(value=5.0)   # 默认 5dB：噪声为信号强度约 1/3，加噪效果直观明显
         self._slider(row, self.snr_var, -10, 60, 1, 150).pack(side=tk.LEFT, padx=6)
         row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._radio(row, "脉冲噪声", self.noise_type, 1).pack(side=tk.LEFT)
@@ -1118,8 +1118,20 @@ class SpeechGUI(tk.Tk):
             # 等中间挡位会被四舍五入成 1x/2x，等于失效）：
             # 输出点数 = 原长度/速度 → 播放时长 = 原时长/速度，快进慢放所有挡位均生效
             n = max(16, int(len(x) / speed))
-            y = x if abs(speed - 1.0) < 1e-6 else resample(x, n)
-            y = np.clip(y.astype(np.float32), -1.0, 1.0)  # 播放前限幅：低SNR高斯峰值可能超过±1，避免削波破音
+            if abs(speed - 1.0) < 1e-6:
+                y = x
+            elif speed < 1.0:
+                y = resample(x, n)
+            else:
+                # 快进：FFT 重采样是"低通式"时间压缩，会丢噪声高频一半能量
+                # （2x 时噪声小 3dB，听感上"加噪不明显"）。按 1-1/speed 的丢失
+                # 比例补回全带宽白噪声，使加噪响度与 SNR 与原速播放大致一致
+                y = resample(x, n)
+                if self.original is not None and len(self.original) == len(x):
+                    p_resid = np.mean((x - self.original) ** 2)
+                    if p_resid > 1e-14:
+                        y = y + np.sqrt(p_resid * (1.0 - 1.0 / speed)) * np.random.randn(n)
+            y = np.clip(np.asarray(y, dtype=np.float32), -1.0, 1.0)  # 播放前限幅：低SNR高斯峰值可能超过±1，避免削波破音
             sd.stop()                            # 先停掉上一段声音，避免与本次播放重叠
             sd.play(y, self.fs)
             self.status_var.set("正在播放（%.2fx）…" % speed)
