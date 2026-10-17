@@ -296,6 +296,7 @@ class FlatSlider(tk.Canvas):
 
 import cv2
 import numpy as np
+import time
 from PIL import Image, ImageTk
 
 
@@ -346,12 +347,13 @@ class TrafficGUI(tk.Tk):
         self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
         self._fps_manual = None     # 手动播放帧率（None=自动，见 fps_override）
         self._fps_est = None        # 播放中按时间戳实测的真实帧率（自动校准，优于容器元数据）
-        self._ms_hist = []          # 最近若干帧的时间戳(ms)，用于实测帧率
+        self._tp_hist = []          # 最近若干(时间戳ms, 帧号)样本，用于实测帧率
         self._det_fast = True       # 经典检测隔帧运行，保证 30fps 视频播放流畅
         self._det_phase = 0         # 隔帧相位计数
         self._track_cache = None    # 最近一次跟踪结果缓存（隔帧重绘用）
         self._img_item = None       # 画布上的画面图像项（复用更新，减负）
         self._last_cv = None        # 画布尺寸缓存（round_rect 仅在尺寸变化时重画）
+        self._last_tick = time.monotonic()   # 播放追赶式读取的时间锚点
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -502,7 +504,7 @@ class TrafficGUI(tk.Tk):
         self._bg = None
         self._bg_vt = -1
         self._fps_est = None           # 实测帧率随新视频重置
-        self._ms_hist = []
+        self._tp_hist = []
         self._img_item = None          # 画布图像项随新视频重置
         self._last_cv = None
         self._track_cache = None       # 隔帧检测缓存随新视频重置
@@ -527,6 +529,7 @@ class TrafficGUI(tk.Tk):
             self.playing = True
             self.btn_play.config(text="⏸ 暂停")
             self.status_var.set("播放中…")
+            self._last_tick = time.monotonic()   # 恢复播放：重置时间锚点，避免暂停期间被算成滞后
             self._tick()
 
     def stop(self):
@@ -542,6 +545,7 @@ class TrafficGUI(tk.Tk):
                 self._show_frame(frame)
         self.btn_play.config(text="▶ 播放")
         self.status_var.set("已停止，回到第一帧")
+        self._last_tick = time.monotonic()
         self._update_info()
 
     def set_fast(self):
@@ -615,13 +619,21 @@ class TrafficGUI(tk.Tk):
             self._bg = cv2.createBackgroundSubtractorMOG2(
                 history=400, varThreshold=vt, detectShadows=True)
             self._bg_vt = vt
-        fg = self._bg.apply(bgr)
+        # 加速：高分辨率视频在前景计算阶段降为半分辨率处理（MOG2/形态学
+        # 耗时约降为 1/4），掩膜计算完再放大回原尺寸，检测框坐标不受影响
+        if w > 960:
+            src = cv2.resize(bgr, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
+        else:
+            src = bgr
+        fg = self._bg.apply(src)
         # 阴影抑制：MOG2 的阴影标记为 127，阈值截断后只保留真实前景
         _, fg = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
         fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN,
                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
         fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE,
                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        if src is not bgr:
+            fg = cv2.resize(fg, (w, h), interpolation=cv2.INTER_NEAREST)
         cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = []
         min_area = max(60, int(w * h * 0.00012))          # 保留小目标（两轮车投影小）
@@ -723,18 +735,36 @@ class TrafficGUI(tk.Tk):
     # ------------------------- 播放主循环 -------------------------
 
     def _tick(self):
-        """播放主循环：按帧率/速度调度下一帧"""
+        """播放主循环（追赶式读取）：
+        按"距上次读帧的真实时间 × 帧率 × 速度"计算该读的帧数，一次读多帧、
+        只显示最新帧。机器处理慢时自动跳帧追赶，保证播放节奏始终与真实时间
+        同步（丢帧但不慢放），不会因为单帧处理耗时而拖慢整个视频。"""
         if not self.playing or self.cap is None:
             return
-        ret, frame = self.cap.read()
+        now = time.monotonic()
+        real_gap = max(0.0, now - self._last_tick)
+        self._last_tick = now
+        eff = max(self._eff_fps(), 1.0)
+        speed = self.speed_var.get()
+        # 应追赶的帧数（上限 1 秒内的帧量，防止长时间卡顿后一次性跳太多）
+        need = max(1, min(int(round(real_gap * eff * speed)),
+                          int(round(eff * speed))))
+        ret, frame = True, None
         bad = 0
-        while not ret and bad < 8:
-            # 坏帧/解码失败容错：跳到下一帧继续读，避免视频中途卡死提前"播放结束"
-            pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, pos + 1)
+        for _ in range(need):
             ret, frame = self.cap.read()
-            bad += 1
-        if not ret:
+            if ret:
+                bad = 0
+                continue
+            # 坏帧/解码失败容错：跳到下一帧继续读（最多连续 8 帧失败）
+            while not ret and bad < 8:
+                pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, pos + 1)
+                ret, frame = self.cap.read()
+                bad += 1
+            if not ret:
+                break
+        if frame is None:
             # 已播到结尾：循环则回到第一帧继续读，否则停止播放
             if self.loop_var.get():
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -748,21 +778,21 @@ class TrafficGUI(tk.Tk):
                         if abs(pos - meta) > 3 else "，全长 %d 帧" % meta)
                 self.status_var.set("播放结束：实际读到 %d 帧%s" % (pos, note))
                 return
-        if not ret:
+        if frame is None:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
         self._calibrate_fps()   # 播放中按时间戳实测真实帧率（元数据误报时自动纠正）
         if self.detect_on:
             self._det_phase = (self._det_phase + 1) % 2
             if self._det_fast and self._det_phase == 0 and self._track_cache:
                 # 隔帧：本轮不跑 MOG2/跟踪，只复用上一帧结果重绘（省一半算力，
-                # 保证 30fps 视频也能实时播放；帧间仅 1/30s 目标位移极小）
+                # 帧间仅 1/30s 目标位移极小）
                 frame = self._draw_tracks(frame)
             else:
                 frame = self._detect(frame)
                 self._track_cache = True
         self._show_frame(frame)
-        # 播放速度越快，帧间隔越短（快进）；越慢，帧间隔越长（慢放）
-        delay = max(1, int(round(1000.0 / max(self._eff_fps(), 1.0) / self.speed_var.get())))
+        # 按视频节拍调度下一轮（本轮超时会在下一轮自动多读帧追赶）
+        delay = max(2, int(round(1000.0 / eff / speed)))
         self.after_id = self.after(delay, self._tick)
         self._update_info()
 
@@ -808,28 +838,31 @@ class TrafficGUI(tk.Tk):
         return "视频"
 
     def _calibrate_fps(self):
-        """用帧时间戳窗口的端点斜率自动实测真实帧率。
-        不能取"相邻间隔中位数"：部分视频容器的时间戳按 1/12s 时间基量化
-        （全部戳都是 83ms 整数倍），中位数恒为 83ms → 会误测成 12fps。
-        端点斜率在 N 帧窗口上做平均，量化误差被摊平（如 12 帧戳前进 1000ms，
-        斜率仍准确还原 30fps）。"""
+        """用 (时间戳, 帧号) 样本的斜率自动实测真实帧率。
+        关键：只用时间戳会与"跳帧追赶"打架——跳帧后相邻记录的时间戳跨度变大，
+        帧率会被误测成 10~12fps，反而导致永远追不上。用帧号差/时间戳差计算，
+        跳帧不影响正确性。"""
         if self._fps_manual is not None:
             return
         try:
-            self._ms_hist.append(float(self.cap.get(cv2.CAP_PROP_POS_MSEC)))
+            self._tp_hist.append((float(self.cap.get(cv2.CAP_PROP_POS_MSEC)),
+                                  float(self.cap.get(cv2.CAP_PROP_POS_FRAMES))))
         except Exception:
             return
-        self._ms_hist = self._ms_hist[-40:]          # 约 1.3s 窗口：足够长以摊平时间戳量化台阶
-        if len(self._ms_hist) < 20:
+        self._tp_hist = self._tp_hist[-40:]
+        if len(self._tp_hist) < 10:
             return
-        d_total = self._ms_hist[-1] - self._ms_hist[0]
-        if d_total <= 0:
+        ms0, p0 = self._tp_hist[0]
+        ms1, p1 = self._tp_hist[-1]
+        d_ms = ms1 - ms0
+        d_fr = p1 - p0
+        if d_ms <= 0 or d_fr < 8:
             return
-        est = 1000.0 * (len(self._ms_hist) - 1) / d_total     # 窗口端点斜率 → fps
+        est = 1000.0 * d_fr / d_ms               # 帧号差/时间戳差 → fps（跳帧免疫）
         if not (1.0 <= est <= 240.0):
             return
         if abs(est - self.fps) <= 8.0:
-            # 实测与元数据一致（含时间戳量化引入的 <20% 偏差）→ 采用更稳的元数据
+            # 实测与元数据一致（含时间戳量化误差）→ 采用更稳的元数据
             self._fps_est = self.fps
         else:
             # 差异巨大：元数据明显不可信（如 30fps 视频被报成 12），采用实测值
