@@ -358,10 +358,14 @@ class TrafficGUI(tk.Tk):
         self.total_cars = 0         # 四轮车计数（跨线）
         self.total_bikes = 0        # 两轮车计数（跨线）
         self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
-        self._fps_manual = None     # 手动播放帧率（None=用视频元数据，见 fps_override）
+        self._fps_manual = None     # 手动播放帧率（None=自动，见 fps_override）
+        self._fps_est = None        # 播放中按时间戳实测的真实帧率（自动校准，优于容器元数据）
+        self._ms_hist = []          # 最近若干帧的时间戳(ms)，用于实测帧率
         self._det_fast = True       # 经典检测隔帧运行，保证 30fps 视频播放流畅
         self._det_phase = 0         # 隔帧相位计数
         self._track_cache = None    # 最近一次跟踪结果缓存（隔帧重绘用）
+        self._img_item = None       # 画布上的画面图像项（复用更新，减负）
+        self._last_cv = None        # 画布尺寸缓存（round_rect 仅在尺寸变化时重画）
 
         # -------- YOLO 按车道检测状态 --------
         self.yolo_on = False        # YOLO 模式开关
@@ -533,6 +537,11 @@ class TrafficGUI(tk.Tk):
         self._bg = None
         self._bg_vt = -1
         self._yolo_cache = None        # YOLO 隔帧缓存随视频重置
+        self._fps_est = None           # 实测帧率随新视频重置
+        self._ms_hist = []
+        self._img_item = None          # 画布图像项随新视频重置
+        self._last_cv = None
+        self._track_cache = None       # 隔帧检测缓存随新视频重置
         self.count_var.set("车辆总数: 0（四轮 0 / 两轮 0）  当前目标: 0")
         return True
 
@@ -965,6 +974,7 @@ class TrafficGUI(tk.Tk):
                 return
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
+        self._calibrate_fps()   # 播放中按时间戳实测真实帧率（元数据误报时自动纠正）
         if self.detect_on:
             self._det_phase = (self._det_phase + 1) % 2
             if self._det_fast and self._det_phase == 0 and self._track_cache:
@@ -985,25 +995,66 @@ class TrafficGUI(tk.Tk):
     # ------------------------- 显示 -------------------------
 
     def _show_frame(self, bgr):
-        """把 OpenCV 帧 (BGR) 转 PIL 图像并等比例居中显示到画布（深色圆角底衬托画面）"""
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)   # OpenCV 的 BGR 序转 PIL 用的 RGB 序
-        pil = Image.fromarray(rgb)
+        """把 OpenCV 帧 (BGR) 转 PIL 图像并等比例居中显示到画布。
+        cv2 线性缩放 + 图像项复用更新（itemconfig），30fps 高分辨率视频也能
+        实时刷新；深色圆角底仅在画布尺寸变化时重画。"""
         cw = self.canvas.winfo_width() or 900
         ch = self.canvas.winfo_height() or 460
-        r = min(cw / pil.width, ch / pil.height)     # 等比缩放比例，画面不变形
-        w = max(1, int(pil.width * r))
-        h = max(1, int(pil.height * r))
-        # BILINEAR 比 LANCZOS 快约 3 倍：30fps 高分辨率视频也能实时显示
-        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.BILINEAR), master=self.canvas)
-        self.canvas.delete("all")
-        # 圆角显示底色：画布本身与卡片同色，圆角外露区域融入卡片背景
-        round_rect(self.canvas, 1, 1, cw, ch, 16, fill=self.C_CANVAS, outline="")
-        self.canvas.create_image(cw // 2, ch // 2, image=photo)
+        h0, w0 = bgr.shape[:2]
+        r = min(cw / w0, ch / h0)                        # 等比缩放比例，画面不变形
+        w = max(1, int(w0 * r))
+        h = max(1, int(h0 * r))
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)       # BGR → RGB
+        small = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+        photo = ImageTk.PhotoImage(Image.fromarray(small), master=self.canvas)
+        if (cw, ch) != self._last_cv:
+            self.canvas.delete("all")                    # 尺寸变化：重建圆角底与图像项
+            round_rect(self.canvas, 1, 1, cw, ch, 16, fill=self.C_CANVAS, outline="")
+            self._img_item = self.canvas.create_image(cw // 2, ch // 2,
+                                                      image=photo, anchor="center")
+            self._last_cv = (cw, ch)
+        else:
+            self.canvas.itemconfig(self._img_item, image=photo)   # 只换图，最快路径
         self.canvas.photo = photo      # 保持引用防止被回收
 
     def _eff_fps(self):
-        """有效播放帧率：用户手动指定优先，否则用视频元数据（兜底 25）"""
-        return self._fps_manual if self._fps_manual else self.fps
+        """有效播放帧率优先级：手动指定 > 播放中时间戳实测 > 视频元数据（兜底 25）"""
+        if self._fps_manual:
+            return self._fps_manual
+        if self._fps_est:
+            return self._fps_est
+        return self.fps
+
+    def _fps_tag(self):
+        """信息栏里的帧率来源标注"""
+        return "手动" if self._fps_manual else ("实测" if self._fps_est else "视频")
+
+    def _calibrate_fps(self):
+        """用相邻帧时间戳自动实测真实帧率。
+        很多视频的容器元数据不可靠（如 30fps 被报成 12），实测值才真实反映
+        播放节奏；连续 6 帧时间戳中位数估算，抗 VFR 抖动。"""
+        if self._fps_manual is not None:
+            return
+        try:
+            self._ms_hist.append(float(self.cap.get(cv2.CAP_PROP_POS_MSEC)))
+        except Exception:
+            return
+        self._ms_hist = self._ms_hist[-8:]
+        if len(self._ms_hist) < 6:
+            return
+        d = np.diff(np.asarray(self._ms_hist, float))
+        d = d[(d > 0) & (d < 2000)]        # 排除跳转/回绕的异常间隔
+        if len(d) < 4:
+            return
+        est = 1000.0 / float(np.median(d))     # 间隔中位数 → 帧率
+        if not (1.0 <= est <= 240):
+            return
+        if self._fps_est is None or abs(est - self._fps_est) > 1.0:
+            first = self._fps_est is None
+            self._fps_est = round(est, 1)
+            if first or abs(est - self.fps) > 2.0:
+                self.status_var.set("已按实测时间戳校准帧率：%.0f fps（元数据 %.0f）"
+                                    % (est, self.fps))
 
     def apply_fps_override(self, _e=None):
         """播放帧率选择器：视频元数据误报时手动指定真实帧率"""
@@ -1017,9 +1068,9 @@ class TrafficGUI(tk.Tk):
             return
         pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
         total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        tag = "手动" if self._fps_manual else "视频"
         self.info_var.set("帧: %d/%d   帧率: %.0f fps(%s)   速度: %.2fx" %
-                          (pos, total, self._eff_fps(), tag, self.speed_var.get()))
+                          (pos, total, self._eff_fps(), self._fps_tag(),
+                           self.speed_var.get()))
 
     def on_close(self):
         """窗口关闭时释放视频资源"""
