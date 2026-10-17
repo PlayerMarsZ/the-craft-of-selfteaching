@@ -451,15 +451,11 @@ class TrafficGUI(tk.Tk):
                  fg=self.C_ACCENT, font=self.F(10, True)
                  ).pack(side=tk.RIGHT, padx=14)
 
-        # 播放帧率选择：视频元数据误报帧率时可手动指定（如确认原片 30fps 就选 30）
+        # 播放帧率选择：自绘圆角按钮 + 主题配色下拉菜单（与整体 macOS 风格统一），
+        # 视频元数据误报帧率时可手动指定（如确认原片 30fps 就选 30）
         self.fps_override = tk.StringVar(value="自动")
-        self._fps_menu = tk.OptionMenu(bar2, self.fps_override, "自动",
-                                       "24", "25", "30", "50", "60",
-                                       command=self.apply_fps_override)
-        self._fps_menu.config(bg=self.GLASS, fg=self.C_TEXT, font=self.F(9),
-                              highlightthickness=0, bd=0, activebackground=self.C_BTN)
-        self._lab(bar2, "播放帧率", size=9).pack(side=tk.LEFT, padx=(16, 0))
-        self._fps_menu.pack(side=tk.LEFT, padx=5, pady=6)
+        self.btn_fps = self._btn(bar2, "播放帧率: 自动 ▾", self._pop_fps_menu, size=9)
+        self.btn_fps.pack(side=tk.LEFT, padx=(16, 0), pady=6)
 
     # ------------------------- 视频开关 -------------------------
 
@@ -875,8 +871,28 @@ class TrafficGUI(tk.Tk):
         """播放帧率选择器：视频元数据误报时手动指定真实帧率"""
         v = self.fps_override.get()
         self._fps_manual = None if v == "自动" else float(v)
+        self.btn_fps.config(text="播放帧率: %s ▾" % v)
         self.status_var.set("播放帧率: %s（当前有效 %.0f fps）" %
                             (v, self._eff_fps()))
+
+    def _set_fps(self, v):
+        """下拉菜单选中帧率项"""
+        self.fps_override.set(v)
+        self.apply_fps_override()
+
+    def _pop_fps_menu(self):
+        """弹出播放帧率下拉菜单（配色/字体与界面主题一致）"""
+        menu = tk.Menu(self, tearoff=False, bg=self.C_CARD, fg=self.C_TEXT,
+                       activebackground="#EAF4FF", activeforeground=self.C_ACCENT,
+                       font=self.F(10), bd=0)
+        for v in ("自动", "24", "25", "30", "50", "60"):
+            menu.add_command(label=v, command=lambda v=v: self._set_fps(v))
+        x = self.btn_fps.winfo_rootx()
+        y = self.btn_fps.winfo_rooty() + self.btn_fps.winfo_height() + 2
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def _update_info(self):
         if self.cap is None:
