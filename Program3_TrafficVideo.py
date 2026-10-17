@@ -358,6 +358,10 @@ class TrafficGUI(tk.Tk):
         self.total_cars = 0         # 四轮车计数（跨线）
         self.total_bikes = 0        # 两轮车计数（跨线）
         self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
+        self._fps_manual = None     # 手动播放帧率（None=用视频元数据，见 fps_override）
+        self._det_fast = True       # 经典检测隔帧运行，保证 30fps 视频播放流畅
+        self._det_phase = 0         # 隔帧相位计数
+        self._track_cache = None    # 最近一次跟踪结果缓存（隔帧重绘用）
 
         # -------- YOLO 按车道检测状态 --------
         self.yolo_on = False        # YOLO 模式开关
@@ -462,6 +466,16 @@ class TrafficGUI(tk.Tk):
         tk.Label(bar2, textvariable=self.count_var, anchor="e", bg=self.GLASS,
                  fg=self.C_ACCENT, font=self.F(10, True)
                  ).pack(side=tk.RIGHT, padx=14)
+
+        # 播放帧率选择：视频元数据误报帧率时可手动指定（如确认原片 30fps 就选 30）
+        self.fps_override = tk.StringVar(value="自动")
+        self._fps_menu = tk.OptionMenu(bar2, self.fps_override, "自动",
+                                       "24", "25", "30", "50", "60",
+                                       command=self.apply_fps_override)
+        self._fps_menu.config(bg=self.GLASS, fg=self.C_TEXT, font=self.F(9),
+                              highlightthickness=0, bd=0, activebackground=self.C_BTN)
+        self._lab(bar2, "播放帧率", size=9).pack(side=tk.LEFT, padx=(16, 0))
+        self._fps_menu.pack(side=tk.LEFT, padx=5, pady=6)
 
         # YOLO 行（按车道识别的两轮/四轮分离统计）
         bar3 = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
@@ -890,10 +904,17 @@ class TrafficGUI(tk.Tk):
                 self._next_id += 1
 
         # ---- 结果叠加到画面（GUI 内直接可见）----
+        return self._draw_tracks(bgr)
+
+    def _draw_tracks(self, bgr):
+        """把当前跟踪结果 + 检测线 + 分账统计叠加到帧上（轻量，可每帧复用缓存）"""
         out = bgr
+        h, w = out.shape[:2]
+        if self._line_y is None:
+            self._line_y = int(h * 0.6)
         cv2.line(out, (0, self._line_y), (w, self._line_y), (0, 200, 255), 2)
         for tid, t in self.tracks.items():
-            if t["lost"] > 0 and t["box"] is None:
+            if t["box"] is None:
                 continue
             x, y, bw, bh = t["box"]
             if t["cls"] == "bike":                        # 两轮车：品红框/紫框
@@ -945,12 +966,19 @@ class TrafficGUI(tk.Tk):
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
         if self.detect_on:
-            frame = self._detect(frame)     # 经典：MOG2 跨线计数（结果叠加显示）
+            self._det_phase = (self._det_phase + 1) % 2
+            if self._det_fast and self._det_phase == 0 and self._track_cache:
+                # 隔帧：本轮不跑 MOG2/跟踪，只复用上一帧结果重绘（省一半算力，
+                # 保证 30fps 视频也能实时播放；帧间仅 1/30s 目标位移极小）
+                frame = self._draw_tracks(frame)
+            else:
+                frame = self._detect(frame)
+                self._track_cache = True
         if self.yolo_on:
             frame = self._detect_yolo(frame)   # YOLO：按车道两轮/四轮分离统计
         self._show_frame(frame)
         # 播放速度越快，帧间隔越短（快进）；越慢，帧间隔越长（慢放）
-        delay = max(1, int(round(1000.0 / max(self.fps, 1.0) / self.speed_var.get())))
+        delay = max(1, int(round(1000.0 / max(self._eff_fps(), 1.0) / self.speed_var.get())))
         self.after_id = self.after(delay, self._tick)
         self._update_info()
 
@@ -965,20 +993,33 @@ class TrafficGUI(tk.Tk):
         r = min(cw / pil.width, ch / pil.height)     # 等比缩放比例，画面不变形
         w = max(1, int(pil.width * r))
         h = max(1, int(pil.height * r))
-        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.LANCZOS), master=self.canvas)
+        # BILINEAR 比 LANCZOS 快约 3 倍：30fps 高分辨率视频也能实时显示
+        photo = ImageTk.PhotoImage(pil.resize((w, h), Image.BILINEAR), master=self.canvas)
         self.canvas.delete("all")
         # 圆角显示底色：画布本身与卡片同色，圆角外露区域融入卡片背景
         round_rect(self.canvas, 1, 1, cw, ch, 16, fill=self.C_CANVAS, outline="")
         self.canvas.create_image(cw // 2, ch // 2, image=photo)
         self.canvas.photo = photo      # 保持引用防止被回收
 
+    def _eff_fps(self):
+        """有效播放帧率：用户手动指定优先，否则用视频元数据（兜底 25）"""
+        return self._fps_manual if self._fps_manual else self.fps
+
+    def apply_fps_override(self, _e=None):
+        """播放帧率选择器：视频元数据误报时手动指定真实帧率"""
+        v = self.fps_override.get()
+        self._fps_manual = None if v == "自动" else float(v)
+        self.status_var.set("播放帧率: %s（当前有效 %.0f fps）" %
+                            (v, self._eff_fps()))
+
     def _update_info(self):
         if self.cap is None:
             return
         pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
         total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.info_var.set("帧: %d/%d   帧率: %.1f fps   速度: %.2fx" %
-                          (pos, total, self.fps, self.speed_var.get()))
+        tag = "手动" if self._fps_manual else "视频"
+        self.info_var.set("帧: %d/%d   帧率: %.0f fps(%s)   速度: %.2fx" %
+                          (pos, total, self._eff_fps(), tag, self.speed_var.get()))
 
     def on_close(self):
         """窗口关闭时释放视频资源"""
