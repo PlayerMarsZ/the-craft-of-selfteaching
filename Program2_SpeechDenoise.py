@@ -1119,8 +1119,9 @@ class SpeechGUI(tk.Tk):
             # 输出点数 = 原长度/速度 → 播放时长 = 原时长/速度，快进慢放所有挡位均生效
             n = max(16, int(len(x) / speed))
             y = x if abs(speed - 1.0) < 1e-6 else resample(x, n)
+            y = np.clip(y.astype(np.float32), -1.0, 1.0)  # 播放前限幅：低SNR高斯峰值可能超过±1，避免削波破音
             sd.stop()                            # 先停掉上一段声音，避免与本次播放重叠
-            sd.play(y.astype(np.float32), self.fs)
+            sd.play(y, self.fs)
             self.status_var.set("正在播放（%.2fx）…" % speed)
         except Exception as e:
             messagebox.showerror("播放出错", str(e))
