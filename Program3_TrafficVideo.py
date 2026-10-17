@@ -29,6 +29,7 @@ from tkinter import font as tkfont
 # =====================================================================
 
 import os
+from functools import partial
 
 # macOS 设计规范：颜色
 COLORS = dict(
@@ -886,7 +887,7 @@ class TrafficGUI(tk.Tk):
                        activebackground="#EAF4FF", activeforeground=self.C_ACCENT,
                        font=self.F(10), bd=0)
         for v in ("自动", "24", "25", "30", "50", "60"):
-            menu.add_command(label=v, command=lambda v=v: self._set_fps(v))
+            menu.add_command(label=v, command=partial(self._set_fps, v))
         x = self.btn_fps.winfo_rootx()
         y = self.btn_fps.winfo_rooty() + self.btn_fps.winfo_height() + 2
         try:
