@@ -29,6 +29,8 @@ from tkinter import font as tkfont
 # =====================================================================
 
 import os
+import threading
+import urllib.request
 
 # macOS 设计规范：颜色
 COLORS = dict(
@@ -36,6 +38,18 @@ COLORS = dict(
     ACCENT="#0A84FF", ACC_D="#0068DA", BTN="#E8E8ED", BTN_D="#D9D9E0",
     LINE="#E3E3E8", OK_GRN="#2FBF5F", CANVAS="#202024", GLASS="#FAFAFC",
 )
+
+# ===== YOLOv8n（ONNX, OpenCV DNN 推理，无需 torch）车辆检测配置 =====
+# 该 ONNX 为 OpenCV 官方 DNN 示例引用的打包版本（输出 1x84x8400，DNN 完全兼容）；
+# ultralytics 官方 assets 已清理 v8 系列 ONNX，故使用此长期稳定的发布源
+YOLO_MODEL_URL = ("https://github.com/CVHub520/X-AnyLabeling/releases/"
+                  "download/v0.1.0/yolov8n.onnx")
+YOLO_MODEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "yolov8n.onnx")
+YOLO_INPUT = 640            # 模型输入尺寸 640x640
+YOLO_CONF = 0.35            # 置信度阈值
+YOLO_COCO_4W = {2: "CAR", 5: "BUS", 7: "TRUCK"}       # 四轮车（COCO 类别）
+YOLO_COCO_2W = {1: "BIKE", 3: "MOTO"}                  # 两轮车（COCO 类别）
 
 
 def enable_hidpi():
@@ -343,6 +357,14 @@ class TrafficGUI(tk.Tk):
         self.total_count = 0        # 跨过虚拟检测线的车辆总数
         self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
 
+        # -------- YOLO 按车道检测状态 --------
+        self.yolo_on = False        # YOLO 模式开关
+        self._yolo_net = None       # cv2.dnn 网络（onnx 加载成功后）
+        self._yolo_ready = False    # 模型是否可用
+        self._yolo_cache = None     # 最近一次推理结果（隔帧复用，降低 CPU 占用）
+        self._yolo_tick = 0         # 隔帧计数（每 3 帧推理一次）
+        self._yolo_dl_pct = -1      # 模型下载进度百分比（-1 表示无下载任务）
+
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -439,6 +461,21 @@ class TrafficGUI(tk.Tk):
                  fg=self.C_ACCENT, font=self.F(10, True)
                  ).pack(side=tk.RIGHT, padx=14)
 
+        # YOLO 行（按车道识别的两轮/四轮分离统计）
+        bar3 = tk.Frame(self, bg=self.GLASS, highlightthickness=0)
+        bar3.pack(side=tk.BOTTOM, fill=tk.X)
+        self.btn_yolo = self._btn(bar3, "YOLO 车道识别: 关", self.toggle_yolo)
+        self.btn_yolo.pack(side=tk.LEFT, padx=(14, 5), pady=6)
+        self._lab(bar3, "车道数", size=9).pack(side=tk.LEFT, padx=(16, 0))
+        self.lane_var = tk.DoubleVar(value=3.0)      # 画面横向均分车道数 1~4
+        FlatSlider(bar3, variable=self.lane_var, from_=1.0, to=4.0, resolution=1.0,
+                   length=90, font=self.F(9, eng=True)
+                   ).pack(side=tk.LEFT, padx=8, pady=8)
+        self.yolo_var = tk.StringVar(value="YOLO 未开启（按车道统计 四轮/两轮）")
+        tk.Label(bar3, textvariable=self.yolo_var, anchor="e", bg=self.GLASS,
+                 fg=self.C_OK, font=self.F(10)
+                 ).pack(side=tk.RIGHT, padx=14)
+
     # ------------------------- 视频开关 -------------------------
 
     def open_video(self, path=None):
@@ -477,6 +514,7 @@ class TrafficGUI(tk.Tk):
         self._line_y = None
         self._bg = None
         self._bg_vt = -1
+        self._yolo_cache = None        # YOLO 隔帧缓存随视频重置
         self.count_var.set("车辆总数: 0    当前目标: 0")
         return True
 
@@ -528,18 +566,16 @@ class TrafficGUI(tk.Tk):
     # ------------------------- 车辆检测 / 计数 -------------------------
 
     def toggle_detect(self):
-        """开启/关闭车辆检测。算法（无需深度学习权重，纯 OpenCV 即可运行）：
-        ① MOG2 动态背景建模提取运动前景（对路灯光影/树叶抖动自适应）；
-        ② 阈值直方截断抑制阴影（MOG2 阴影标记=127，直接滤除）；
-        ③ 形态学开运算去噪点 + 闭运算补车辆空洞；
-        ④ 面积/长宽比约束过滤行人、路噪，IoU 合并同一辆车的碎片框；
-        ⑤ 质心 EMA 平滑 + 最近邻多目标跟踪（每辆车唯一 ID，不会重复计数）；
-        ⑥ 虚拟检测线绊线计数：车辆质心跨过画面 60% 高度线时计数并记录方向。"""
+        """开启/关闭经典车辆检测（MOG2 跨线计数）。与 YOLO 模式互斥。"""
         if self.cap is None:
             messagebox.showwarning("提示", "请先打开视频文件")
             return
         self.detect_on = not self.detect_on
         if self.detect_on:
+            if self.yolo_on:            # 互斥：开启经典检测时关闭 YOLO
+                self.yolo_on = False
+                self.btn_yolo.config(text="YOLO 车道识别: 关")
+                self.yolo_var.set("YOLO 未开启（按车道统计 四轮/两轮）")
             self.btn_detect.config(text="车辆检测: 开")
             self.status_var.set("车辆检测已开启：跨线计数（可调灵敏度）")
         else:
@@ -552,6 +588,191 @@ class TrafficGUI(tk.Tk):
         self.tracks = {}
         self.count_var.set("车辆总数: 0    当前目标: 0")
         self.status_var.set("计数已清零")
+
+    # ------------------------- YOLO 按车道识别（两轮/四轮分离） -------------------------
+
+    def toggle_yolo(self):
+        """开启/关闭 YOLO 车道识别模式（与经典检测互斥）：
+        模型文件 yolov8n.onnx 放在脚本同目录即用；缺失时自动后台下载
+        （约 13MB，OpenCV 官方示例同款发布源），下载完成后自动加载。"""
+        if self.cap is None:
+            messagebox.showwarning("提示", "请先打开视频文件")
+            return
+        self.yolo_on = not self.yolo_on
+        if self.yolo_on:
+            if self.detect_on:          # 互斥：关闭经典检测
+                self.detect_on = False
+                self.btn_detect.config(text="车辆检测: 关")
+            if self._yolo_net is not None:
+                self._yolo_ready = True
+                self.btn_yolo.config(text="YOLO 车道识别: 开")
+                self.status_var.set("YOLO 车道识别已开启（绿框=四轮 橙框=两轮）")
+            elif os.path.exists(YOLO_MODEL_FILE):
+                self._load_yolo_model()
+            else:
+                self.btn_yolo.config(text="YOLO 模型下载中…")
+                self.status_var.set("首次使用：正在后台下载 yolov8n.onnx（约 13MB）…")
+                self._download_yolo_model()
+        else:
+            self._yolo_cache = None
+            self.btn_yolo.config(text="YOLO 车道识别: 关")
+            self.yolo_var.set("YOLO 未开启（按车道统计 四轮/两轮）")
+            self.status_var.set("YOLO 车道识别已关闭")
+
+    def _load_yolo_model(self):
+        """加载本地 yolov8n.onnx（OpenCV DNN，CPU 推理，无需 PyTorch）"""
+        try:
+            self._yolo_net = cv2.dnn.readNetFromONNX(YOLO_MODEL_FILE)
+            self._yolo_ready = True
+            self.btn_yolo.config(text="YOLO 车道识别: 开")
+            self.status_var.set("YOLO 模型加载成功（绿框=四轮 橙框=两轮）")
+        except Exception as e:
+            self._yolo_ready = False
+            self.yolo_on = False
+            self.btn_yolo.config(text="YOLO 车道识别: 关")
+            messagebox.showerror(
+                "模型加载失败",
+                "yolov8n.onnx 加载失败：%s\n\n请确认模型文件完整，"
+                "或删除后重新开启（自动重新下载）" % e)
+
+    def _download_yolo_model(self):
+        """后台线程下载 yolov8n.onnx；下载完成后回到主线程加载"""
+
+        def _dl():
+            try:
+                req = urllib.request.Request(YOLO_MODEL_URL,
+                                             headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    total = int(r.headers.get("Content-Length") or 0)
+                    done = 0
+                    with open(YOLO_MODEL_FILE + ".part", "wb") as fp:
+                        while True:
+                            chunk = r.read(1 << 16)
+                            if not chunk:
+                                break
+                            fp.write(chunk)
+                            done += len(chunk)
+                            self._yolo_dl_pct = (done * 100 // total) if total else -1
+                os.replace(YOLO_MODEL_FILE + ".part", YOLO_MODEL_FILE)
+                self._yolo_dl_pct = 100
+            except Exception as e:
+                self._yolo_dl_pct = -2          # -2 = 失败
+                self._yolo_err = str(e)
+
+        threading.Thread(target=_dl, daemon=True).start()
+        self.after(300, self._poll_yolo_download)
+
+    def _poll_yolo_download(self):
+        """轮询模型下载进度：完成→加载模型；失败→提示手动放置"""
+        pct = self._yolo_dl_pct
+        if pct == -1:                       # 仍在下载（无长度信息）
+            self.status_var.set("正在下载 yolov8n.onnx …")
+            self.after(400, self._poll_yolo_download)
+        elif pct == 100:
+            self.status_var.set("模型下载完成，正在加载…")
+            self._load_yolo_model()
+        elif pct == -2:
+            self.yolo_on = False
+            self.btn_yolo.config(text="YOLO 车道识别: 关")
+            messagebox.showerror(
+                "下载失败", "模型自动下载失败：%s\n\n请手动下载 yolov8n.onnx 并"
+                "放到本程序同目录（%s）：\n%s" %
+                (getattr(self, "_yolo_err", "网络不可达"), os.path.dirname(YOLO_MODEL_FILE),
+                 YOLO_MODEL_URL))
+        else:
+            self.status_var.set("正在下载 YOLO 模型 %d%%…" % pct)
+            self.after(400, self._poll_yolo_download)
+
+    def _lane_boxes(self, w, h):
+        """车道划分：画面横向均分 lane_count 份，返回 (车道宽度, x 边界列表)"""
+        n = max(1, min(4, int(self.lane_var.get())))
+        return w / n, [int(w * i / n) for i in range(n + 1)]
+
+    def _detect_yolo(self, frame):
+        """YOLO 按车道检测：每 3 帧推理一次（640x640 CPU 推理，隔帧以保流畅），
+        中间帧沿用上次结果。两轮/四轮用不同框区分，画面叠加车道虚线与分车道
+        统计标签。"""
+        h, w = frame.shape[:2]
+        self._yolo_tick = (self._yolo_tick + 1) % 3
+        if self._yolo_tick != 1 and self._yolo_cache is not None:
+            self._draw_yolo(frame, self._yolo_cache)   # 隔帧：复用缓存结果重绘
+            return frame
+        if not self._yolo_ready or self._yolo_net is None:
+            return frame
+
+        dets = []          # [(cls_letter, conf, x, y, bw, bh)]
+        try:
+            blob = cv2.dnn.blobFromImage(frame, 1 / 255.0, (YOLO_INPUT, YOLO_INPUT),
+                                         swapRB=True, crop=False)
+            self._yolo_net.setInput(blob)
+            out = self._yolo_net.forward()          # (1, 84, 8400)
+            rows = out[0].T                          # (8400, 84): cx,cy,bw,bh + 80类分数
+            boxes, scores, kinds = [], [], []
+            for r in rows:
+                cs = r[4:]
+                i = int(np.argmax(cs))
+                label, is_4w = None, False
+                if i in YOLO_COCO_4W:
+                    label, is_4w = YOLO_COCO_4W[i], True
+                elif i in YOLO_COCO_2W:
+                    label = YOLO_COCO_2W[i]
+                else:
+                    continue
+                score = float(cs[i])
+                if score < YOLO_CONF:
+                    continue
+                cx, cy, bw, bh = r[:4]
+                x, y = (cx - bw / 2) * w, (cy - bh / 2) * h
+                bw, bh = bw * w, bh * h
+                boxes.append([x, y, bw, bh])
+                scores.append(score)
+                kinds.append((label, is_4w))
+            idx = cv2.dnn.NMSBoxes(boxes, scores, YOLO_CONF, 0.45)
+            for k in (idx.flatten() if len(idx) else []):
+                x, y, bw, bh = boxes[k]
+                dets.append((kinds[k][0], kinds[k][1], scores[k],
+                             int(x), int(y), int(bw), int(bh)))
+        except Exception:
+            pass
+        self._yolo_cache = dets
+        self._draw_yolo(frame, dets)
+        return frame
+
+    def _draw_yolo(self, frame, dets):
+        """把 YOLO 检测框 + 车道分隔虚线 + 分车道统计画到帧上（返回的帧直接显示）"""
+        h, w = frame.shape[:2]
+        lane_w, xs = self._lane_boxes(w, h)
+        # 车道分隔虚线
+        for x0 in xs[1:-1]:
+            yy = 0
+            while yy < h:
+                cv2.line(frame, (x0, yy), (x0, min(yy + 18, h)), (240, 240, 240), 1)
+                yy += 32
+        # 每车道内 4 轮/2 轮统计
+        cnt = [[0, 0] for _ in range(len(xs) - 1)]   # [四轮, 两轮] 按车道
+        for (label, is_4w, conf, x, y, bw, bh) in dets:
+            lane = max(0, min(len(cnt) - 1, int((x + bw / 2) // lane_w)))
+            cnt[lane][0 if is_4w else 1] += 1
+            color = (46, 199, 85) if is_4w else (0, 165, 255)   # 四轮绿 / 两轮橙
+            cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
+            if not is_4w:               # 两轮车：加内圈细框（双框样式区分）
+                cv2.rectangle(frame, (x + 3, y + 3), (x + bw - 3, y + bh - 3), color, 1)
+            cv2.putText(frame, "%s %.2f" % (label, conf), (x, max(38, y - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2, cv2.LINE_AA)
+        # 顶部统计条 + 各车道标签（车道标签放条下方各自车道内，避免文字重叠）
+        cv2.rectangle(frame, (0, 0), (w, 34), (28, 30, 40), -1)
+        total4 = sum(c[0] for c in cnt); total2 = sum(c[1] for c in cnt)
+        cv2.putText(frame, "YOLO 4W:%d  2W:%d  TOTAL:%d" % (total4, total2, total4 + total2),
+                    (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
+                    cv2.LINE_AA)
+        for i, c in enumerate(cnt):
+            cv2.putText(frame, "L%d 4W:%d 2W:%d" % (i + 1, c[0], c[1]),
+                        (xs[i] + 6, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 255), 2, cv2.LINE_AA)
+        # GUI 底部统计栏（中文）
+        parts = ["车道%d 四轮%d 两轮%d" % (i + 1, c[0], c[1])
+                 for i, c in enumerate(cnt)]
+        self.yolo_var.set(" | ".join(parts) + " | 合计 %d 辆" % (total4 + total2))
 
     def _merge_boxes(self, boxes):
         """重叠/包含框合并：消除同一辆车前后轮区域被拆成多个检测的问题"""
@@ -687,7 +908,9 @@ class TrafficGUI(tk.Tk):
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
         if self.detect_on:
-            frame = self._detect(frame)     # 车辆检测 + 计数标注（结果直接叠加显示）
+            frame = self._detect(frame)     # 经典：MOG2 跨线计数（结果叠加显示）
+        if self.yolo_on:
+            frame = self._detect_yolo(frame)   # YOLO：按车道两轮/四轮分离统计
         self._show_frame(frame)
         # 播放速度越快，帧间隔越短（快进）；越慢，帧间隔越长（慢放）
         delay = max(1, int(round(1000.0 / max(self.fps, 1.0) / self.speed_var.get())))
