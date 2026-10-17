@@ -352,9 +352,11 @@ class TrafficGUI(tk.Tk):
         self.detect_on = False      # 检测开关
         self._bg = None             # MOG2 背景建模器（开启检测时创建）
         self._bg_vt = -1            # 建模器对应的灵敏度参数（变化时重建）
-        self.tracks = {}            # 跟踪目标 {id: {c:(x,y), last:(x,y), counted, box}}
+        self.tracks = {}            # 跟踪目标 {id: {c:(x,y), last:(x,y), counted, box, cls}}
         self._next_id = 0
-        self.total_count = 0        # 跨过虚拟检测线的车辆总数
+        self.total_count = 0        # 跨线车辆总数（= total_cars + total_bikes）
+        self.total_cars = 0         # 四轮车计数（跨线）
+        self.total_bikes = 0        # 两轮车计数（跨线）
         self._line_y = None         # 检测线 y 坐标（按画面高度比例 0.6 设定）
 
         # -------- YOLO 按车道检测状态 --------
@@ -456,7 +458,7 @@ class TrafficGUI(tk.Tk):
                    length=140, font=self.F(9, eng=True)
                    ).pack(side=tk.LEFT, padx=8, pady=8)
 
-        self.count_var = tk.StringVar(value="车辆总数: 0    当前目标: 0")
+        self.count_var = tk.StringVar(value="车辆总数: 0（四轮 0 / 两轮 0）  当前目标: 0")
         tk.Label(bar2, textvariable=self.count_var, anchor="e", bg=self.GLASS,
                  fg=self.C_ACCENT, font=self.F(10, True)
                  ).pack(side=tk.RIGHT, padx=14)
@@ -511,11 +513,13 @@ class TrafficGUI(tk.Tk):
         # 新视频：清空检测统计（背景模型与跟踪目标一并重置）
         self.tracks = {}
         self.total_count = 0
+        self.total_cars = 0
+        self.total_bikes = 0
         self._line_y = None
         self._bg = None
         self._bg_vt = -1
         self._yolo_cache = None        # YOLO 隔帧缓存随视频重置
-        self.count_var.set("车辆总数: 0    当前目标: 0")
+        self.count_var.set("车辆总数: 0（四轮 0 / 两轮 0）  当前目标: 0")
         return True
 
     # ------------------------- 播放控制 -------------------------
@@ -583,10 +587,12 @@ class TrafficGUI(tk.Tk):
             self.status_var.set("车辆检测已关闭")
 
     def reset_count(self):
-        """清空车辆计数与当前跟踪目标"""
+        """清空车辆计数与当前跟踪目标（四轮/两轮分开清）"""
         self.total_count = 0
+        self.total_cars = 0
+        self.total_bikes = 0
         self.tracks = {}
-        self.count_var.set("车辆总数: 0    当前目标: 0")
+        self.count_var.set("车辆总数: 0（四轮 0 / 两轮 0）  当前目标: 0")
         self.status_var.set("计数已清零")
 
     # ------------------------- YOLO 按车道识别（两轮/四轮分离） -------------------------
@@ -775,14 +781,15 @@ class TrafficGUI(tk.Tk):
         self.yolo_var.set(" | ".join(parts) + " | 合计 %d 辆" % (total4 + total2))
 
     def _merge_boxes(self, boxes):
-        """重叠/包含框合并：消除同一辆车前后轮区域被拆成多个检测的问题"""
+        """重叠/包含框合并：消除同一辆车前后轮区域被拆成多个检测的问题。
+        框格式 [x, y, w, h, cls]；合并时继承面积较大框的类别（两轮/四轮）。"""
         changed = True
         while changed and len(boxes) > 1:
             changed = False
             for i in range(len(boxes)):
                 for j in range(i + 1, len(boxes)):
-                    x1, y1, w1, h1 = boxes[i]
-                    x2, y2, w2, h2 = boxes[j]
+                    x1, y1, w1, h1 = boxes[i][:4]
+                    x2, y2, w2, h2 = boxes[j][:4]
                     ix = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
                     iy = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
                     inter = ix * iy
@@ -790,7 +797,8 @@ class TrafficGUI(tk.Tk):
                         ux = min(x1, x2); uy = min(y1, y2)
                         uw = max(x1 + w1, x2 + w2) - ux
                         uh = max(y1 + h1, y2 + h2) - uy
-                        boxes[i] = [ux, uy, uw, uh]
+                        keep = i if w1 * h1 >= w2 * h2 else j
+                        boxes[i] = [ux, uy, uw, uh, boxes[keep][4]]
                         boxes.pop(j)
                         changed = True
                         break
@@ -819,19 +827,25 @@ class TrafficGUI(tk.Tk):
                               cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
         cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = []
-        min_area = max(120, int(w * h * 0.0004))
+        min_area = max(60, int(w * h * 0.00012))          # 保留小目标（两轮车投影小）
+        bike_big = int(w * h * 0.008)                      # 小于该面积的两轮车候选
         for c in cnts:
             x, y, bw, bh = cv2.boundingRect(c)
-            if bw * bh < min_area:
+            area = bw * bh
+            if area < min_area:
                 continue
             ar = bw / max(bh, 1)
-            if not (0.3 <= ar <= 4.0):       # 车辆宽扁结构，过滤行人/细长噪声
+            if not (0.25 <= ar <= 4.5):       # 放宽比例约束：自行车窄长也保留
                 continue
-            boxes.append([x, y, bw, bh])
+            # 两轮/四轮启发式分类：
+            # ① 窄长目标（自行车，ar<0.6）；② 目标投影小且近似方形（摩托车，
+            # 面积小于画面 0.8% 且 ar<0.95）。其余按四轮汽车计。
+            cls = "bike" if ((area < bike_big and ar < 0.95) or ar < 0.6) else "car"
+            boxes.append([x, y, bw, bh, cls])
         boxes = self._merge_boxes(boxes)
 
         # ---- 质心最近邻跟踪 + EMA 平滑 ----
-        cents = [(x + bw / 2.0, y + bh / 2.0) for (x, y, bw, bh) in boxes]
+        cents = [(x + bw / 2.0, y + bh / 2.0) for (x, y, bw, bh, _c) in boxes]
         used = [False] * len(cents)
         for tid, t in self.tracks.items():
             best, bd = None, 1e9
@@ -847,23 +861,31 @@ class TrafficGUI(tk.Tk):
                 t["last"], t["c"] = t["c"], t["c"]      # 旧质心记为上一帧位置
                 t["c"] = (0.72 * nc[0] + 0.28 * t["c"][0],
                           0.72 * nc[1] + 0.28 * t["c"][1])   # EMA 平滑防抖动
-                t["box"] = boxes[best]
+                t["box"] = boxes[best][:4]
+                t["cls"] = boxes[best][4]
                 t["lost"] = 0
-                # 虚拟检测线绊线计数（带方向，跨线只计一次）
+                # 虚拟检测线绊线计数（带方向，跨线只计一次；四轮/两轮分账）
                 if not t["counted"]:
                     prev_y, cur_y = t["last"][1], t["c"][1]
                     if (prev_y - self._line_y) * (cur_y - self._line_y) < 0 or \
                             (prev_y != self._line_y and cur_y == self._line_y):
                         t["counted"] = True
-                        self.total_count += 1
-                        self.status_var.set("检测到车辆驶过检测线（总数 %d）"
-                                            % self.total_count)
+                        if t["cls"] == "bike":
+                            self.total_bikes += 1
+                        else:
+                            self.total_cars += 1
+                        self.total_count = self.total_cars + self.total_bikes
+                        self.status_var.set(
+                            "检测到%s驶过检测线（四轮 %d / 两轮 %d）" %
+                            ("两轮车" if t["cls"] == "bike" else "四轮车",
+                             self.total_cars, self.total_bikes))
             else:
                 t["lost"] += 1
         self.tracks = {tid: t for tid, t in self.tracks.items() if t["lost"] <= 4}
         for i, c in enumerate(cents):
-            if not used[i]:                # 新出现目标 → 分配唯一 ID
-                self.tracks[self._next_id] = {"c": c, "last": c, "box": boxes[i],
+            if not used[i]:                # 新出现目标 → 分配唯一 ID（类别随框）
+                self.tracks[self._next_id] = {"c": c, "last": c, "box": boxes[i][:4],
+                                              "cls": boxes[i][4],
                                               "counted": False, "lost": 0}
                 self._next_id += 1
 
@@ -874,18 +896,24 @@ class TrafficGUI(tk.Tk):
             if t["lost"] > 0 and t["box"] is None:
                 continue
             x, y, bw, bh = t["box"]
-            color = (46, 199, 85) if t["counted"] else (0, 150, 255)  # 绿=已计数 橙=未过线
+            if t["cls"] == "bike":                        # 两轮车：品红框/紫框
+                color = (200, 60, 200) if t["counted"] else (255, 0, 220)
+                tag = "BIKE %d" % tid
+            else:                                          # 四轮车：绿=已计数 橙=未过线
+                color = (46, 199, 85) if t["counted"] else (0, 150, 255)
+                tag = "CAR %d" % tid
             cv2.rectangle(out, (x, y), (x + bw, y + bh), color, 2)
             cv2.circle(out, (int(t["c"][0]), int(t["c"][1])), 4, color, -1)
-            cv2.putText(out, "ID %d" % tid, (x, max(38, y - 6)),   # 38=顶部统计条下方，避免被遮挡
+            cv2.putText(out, tag, (x, max(38, y - 6)),   # 38=顶部统计条下方，避免被遮挡
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
         cv2.rectangle(out, (0, 0), (w, 34), (28, 30, 40), -1)
-        cv2.putText(out, "TOTAL: %d   TRACKING: %d   LINE" %
-                    (self.total_count, len(self.tracks)),
+        cv2.putText(out, "CARS: %d   BIKES: %d   TRACKING: %d   LINE" %
+                    (self.total_cars, self.total_bikes, len(self.tracks)),
                     (10, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                     cv2.LINE_AA)
-        self.count_var.set("车辆总数: %d    当前目标: %d" %
-                           (self.total_count, len(self.tracks)))
+        self.count_var.set("车辆总数: %d（四轮 %d / 两轮 %d）  当前目标: %d" %
+                           (self.total_count, self.total_cars, self.total_bikes,
+                            len(self.tracks)))
         return out
 
     # ------------------------- 播放主循环 -------------------------
@@ -895,6 +923,13 @@ class TrafficGUI(tk.Tk):
         if not self.playing or self.cap is None:
             return
         ret, frame = self.cap.read()
+        bad = 0
+        while not ret and bad < 8:
+            # 坏帧/解码失败容错：跳到下一帧继续读，避免视频中途卡死提前"播放结束"
+            pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, pos + 1)
+            ret, frame = self.cap.read()
+            bad += 1
         if not ret:
             # 已播到结尾：循环则回到第一帧继续读，否则停止播放
             if self.loop_var.get():
@@ -903,7 +938,9 @@ class TrafficGUI(tk.Tk):
             else:
                 self.playing = False
                 self.btn_play.config(text="▶ 播放")
-                self.status_var.set("播放结束")
+                pos = int(self.cap.get(cv2.CAP_PROP_POS_FRAMES))
+                total = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                self.status_var.set("播放结束（第 %d / %d 帧）" % (pos, total))
                 return
         if not ret:
             return      # 循环读取仍失败（损坏帧等），本帧直接跳过
