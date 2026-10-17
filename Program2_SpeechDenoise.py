@@ -1076,7 +1076,9 @@ class SpeechGUI(tk.Tk):
         self.status_var.set("已保存: " + path)
 
     def gen_test(self):
-        """合成测试语音：440Hz 基频 + 2/3 次谐波 + 方波 + 轻微噪声"""
+        """合成测试语音：440Hz 基频 + 2/3 次谐波 + 方波 + 轻微噪声。
+        加 15ms 淡入/淡出包络：避免信号在 t=0 硬启动（正弦瞬间满幅、方波瞬间
+        跳变），让波形开头/结尾平滑过渡，屏幕上不再出现起始垂直突变。"""
         fs = int(self.fs_combo.get())
         dur = 2.0
         t = np.linspace(0, dur, int(fs * dur), endpoint=False)
@@ -1085,6 +1087,11 @@ class SpeechGUI(tk.Tk):
              + 0.15 * np.sin(2 * np.pi * 1320 * t)
              + 0.10 * np.sign(np.sin(2 * np.pi * 220 * t))
              + 0.02 * np.random.randn(len(t)))
+        fade = int(0.015 * fs)                 # 15ms 淡入淡出
+        env = np.ones(len(t))
+        env[:fade] = np.linspace(0.0, 1.0, fade)
+        env[-fade:] = np.linspace(1.0, 0.0, fade)
+        s = s * env
         self.original = s / np.abs(s).max() * 0.8   # 归一化到峰值 0.8，留出响度余量
         self.fs = fs
         self.noisy = self.denoised = None
