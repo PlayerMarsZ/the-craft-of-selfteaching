@@ -682,7 +682,7 @@ class SpeechGUI(tk.Tk):
         self._radio(row, "高斯白噪声", self.noise_type, 0).pack(side=tk.LEFT)
         self._lab(row, "SNR(dB)", size=9).pack(side=tk.LEFT, padx=(6, 0))
         self.snr_var = tk.DoubleVar(value=5.0)   # 默认 5dB：噪声为信号强度约 1/3，加噪效果直观明显
-        self._slider(row, self.snr_var, -10, 60, 1, 150).pack(side=tk.LEFT, padx=6)
+        self._slider(row, self.snr_var, -10, 30, 1, 150).pack(side=tk.LEFT, padx=6)   # SNR 上限 30dB
         row = tk.Frame(f3.inner, bg=self.C_CARD); row.pack(fill=tk.X, padx=11)
         self._radio(row, "脉冲噪声", self.noise_type, 1).pack(side=tk.LEFT)
         self._lab(row, "密度(%)", size=9).pack(side=tk.LEFT, padx=(6, 0))
